@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  db:
+    # Используем официальный образ с уже установленным pgvector
+    image: pgvector/pgvector:0.8.1-pg18-trixie
+    container_name: clinscriptum-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: axuf1396
+      POSTGRES_DB: clinscriptum
+    ports:
+      - "5432:5432"
+    volumes:
+      # Сохраняем данные, чтобы они не исчезли после перезагрузки
+      - pg_vector_data:/var/lib/postgresql
+
+volumes:
+  pg_vector_data:  

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+supabase
+python-dotenv
+docling
+pydantic
+openai 
+yandex-chain 
+tenacity # Для ретраев

@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+- Always use Context7 for library documentation:
+  - Before suggesting code for any external library, use resolve-library-id and get-library-docs
+  - Never rely on training data for framework APIs (Next.js, React, Vue, etc.)
+  - Pull docs first, then code
+  - Use version-specific documentation when available
