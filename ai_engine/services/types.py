@@ -9,7 +9,7 @@ from typing import Optional
 class Section:
     """
     Представляет секцию документа после парсинга.
-    Соответствует структуре таблицы document_sections.
+    Соответствует структуре таблицы source_sections.
     """
     section_number: Optional[str] = None  # например "3.1.2"
     header: Optional[str] = None  # например "Критерии включения"

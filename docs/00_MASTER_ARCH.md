@@ -19,6 +19,10 @@
     *   Базовый класс: `BaseParser` (абстрактный интерфейс)
     *   Реализации: `DoclingParser` (по умолчанию), `AzureParser` (планируется)
     *   Поддержка переключения парсера без изменения логики работы с БД
+*   **Content Generation:** Сервис `ContentWriter` для генерации черновиков секций документов:
+    *   Использует Template Graph для поиска правил маппинга
+    *   Интегрирует глобальный контекст исследования (Study Globals)
+    *   Возвращает результат с метаданными для Audit Trail (`GenerationResult`)
 *   **LLM:** **YandexGPT Pro** (API) или **Qwen 2.5** (Self-hosted vLLM).
 *   **Orchestration:** LangChain / LiteLLM.
 
@@ -28,9 +32,12 @@
 1.  **Organizations & Users:** Стандартная схема Supabase (RBAC).
 2.  **Projects:** Исследования.
 3.  **SourceDocuments:** Метаданные файлов.
-4.  **DocumentSections (Вместо RagChunks):**
+4.  **SourceSections (Вместо RagChunks):**
     *   Хранит структуру: Заголовок, Номер секции, Контент (Markdown), Таблицы.
     *   Поле `embedding` (vector) для гибридного поиска.
+5.  **Deliverables & DeliverableSections:**
+    *   Готовые документы (Outputs), созданные на основе шаблонов.
+    *   DeliverableSection содержит HTML контент для редактора и ссылки на использованные source_sections.
 5.  **StudyGlobals (Global Context):**
     *   "Паспорт исследования": Фаза, Препарат, Популяция и т.д.
     *   Извлекается автоматически из Синопсиса.

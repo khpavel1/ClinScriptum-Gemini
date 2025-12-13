@@ -2,16 +2,24 @@
 Точка входа для микросервиса AI Engine на FastAPI.
 Включает настройку CORS, эндпоинты и запуск Uvicorn.
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from uuid import UUID
 from contextlib import asynccontextmanager
 import uvicorn
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from config import settings
-from database import init_db, close_db
+from database import init_db, close_db, get_db
+from models import DocTemplate, TemplateSection
 from services import DoclingParser, Section
 from services.parser import process_document
+from services.llm import LLMClient
+from services.extractor import GlobalExtractor
+from services.writer import SectionWriter
+from sqlalchemy import select
 
 
 @asynccontextmanager
@@ -135,6 +143,7 @@ class ParseDocumentRequest(BaseModel):
     document_id: str
     file_path: str
     file_url: Optional[str] = None
+    template_id: Optional[str] = None  # UUID шаблона для классификации секций
 
 
 class ParseDocumentResponse(BaseModel):
@@ -142,6 +151,27 @@ class ParseDocumentResponse(BaseModel):
     message: str
     document_id: str
     status: str = "processing"
+
+
+class GenerateRequest(BaseModel):
+    """Запрос на генерацию секции документа."""
+    project_id: str
+    target_section_id: str  # UUID целевой секции шаблона
+    deliverable_id: str  # UUID документа (deliverable), в который сохраняется секция
+
+
+class GenerateResponse(BaseModel):
+    """Ответ на запрос генерации секции."""
+    content: str  # Markdown текст секции
+    target_section_id: str
+
+
+class TemplateResponse(BaseModel):
+    """Ответ с информацией о шаблоне."""
+    id: str
+    name: str
+    description: Optional[str] = None
+    sections: List[dict] = []
 
 
 @app.post("/api/v1/parse", response_model=ParseDocumentResponse)
@@ -153,7 +183,7 @@ async def parse_document_background(
     Запускает парсинг документа в фоне и сохраняет секции в БД.
     
     Args:
-        request: Запрос с document_id и file_path (или file_url)
+        request: Запрос с document_id, file_path (или file_url) и template_id
         background_tasks: FastAPI BackgroundTasks для асинхронной обработки
         
     Returns:
@@ -168,7 +198,8 @@ async def parse_document_background(
             process_document,
             doc_id=request.document_id,
             file_url=request.file_url,
-            file_path=request.file_path
+            file_path=request.file_path,
+            template_id=request.template_id
         )
         
         return ParseDocumentResponse(
@@ -182,6 +213,112 @@ async def parse_document_background(
         raise HTTPException(
             status_code=500,
             detail=f"Ошибка при запуске парсинга документа: {str(e)}"
+        )
+
+
+@app.post("/parse", response_model=ParseDocumentResponse)
+async def parse_document(
+    request: ParseDocumentRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Запускает парсинг документа в фоне (алиас для /api/v1/parse).
+    """
+    return await parse_document_background(request, background_tasks)
+
+
+@app.post("/generate", response_model=GenerateResponse)
+async def generate_section(
+    request: GenerateRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Генерирует целевую секцию документа на основе Template Graph.
+    
+    Args:
+        request: Запрос с project_id и target_section_id
+        db: SQLAlchemy асинхронная сессия
+        
+    Returns:
+        Сгенерированный текст секции в формате Markdown
+        
+    Raises:
+        HTTPException: Если произошла ошибка при генерации
+    """
+    try:
+        project_uuid = UUID(request.project_id)
+        target_section_uuid = UUID(request.target_section_id)
+        deliverable_uuid = UUID(request.deliverable_id)
+        
+        # Инициализируем сервисы
+        llm_client = LLMClient()
+        writer = SectionWriter(llm_client)
+        
+        # Генерируем секцию
+        content = await writer.generate_target_section(
+            session=db,
+            project_id=project_uuid,
+            target_template_section_id=target_section_uuid,
+            deliverable_id=deliverable_uuid
+        )
+        
+        return GenerateResponse(
+            content=content,
+            target_section_id=request.target_section_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при генерации секции: {str(e)}"
+        )
+
+
+@app.get("/templates", response_model=List[TemplateResponse])
+async def get_templates(db: AsyncSession = Depends(get_db)):
+    """
+    Возвращает список доступных шаблонов документов.
+    
+    Args:
+        db: SQLAlchemy асинхронная сессия
+        
+    Returns:
+        Список шаблонов с их секциями
+    """
+    try:
+        # Получаем все шаблоны
+        result = await db.execute(select(DocTemplate))
+        templates = result.scalars().all()
+        
+        templates_response = []
+        for template in templates:
+            # Получаем секции шаблона
+            sections_result = await db.execute(
+                select(TemplateSection).where(TemplateSection.template_id == template.id)
+            )
+            sections = sections_result.scalars().all()
+            
+            templates_response.append(TemplateResponse(
+                id=str(template.id),
+                name=template.name,
+                description=template.description,
+                sections=[
+                    {
+                        "id": str(section.id),
+                        "title": section.title,
+                        "section_number": section.section_number,
+                        "is_mandatory": section.is_mandatory
+                    }
+                    for section in sections
+                ]
+            ))
+        
+        return templates_response
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при получении шаблонов: {str(e)}"
         )
 
 

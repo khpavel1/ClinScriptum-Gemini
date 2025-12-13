@@ -9,3 +9,5 @@ pydantic
 openai 
 yandex-chain 
 tenacity # Для ретраев
+pgvector
+httpx

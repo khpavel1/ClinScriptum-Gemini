@@ -14,49 +14,172 @@ export type Database = {
   }
   public: {
     Tables: {
-      document_sections: {
+      canonical_anchors: {
         Row: {
-          content_markdown: string | null
-          content_text: string | null
+          anchor_text: string
+          canonical_code: string
           created_at: string | null
-          document_id: string | null
           embedding: string | null
-          header: string | null
           id: string
-          page_number: number | null
-          section_number: string | null
         }
         Insert: {
-          content_markdown?: string | null
-          content_text?: string | null
+          anchor_text: string
+          canonical_code: string
           created_at?: string | null
-          document_id?: string | null
           embedding?: string | null
-          header?: string | null
           id?: string
-          page_number?: number | null
-          section_number?: string | null
         }
         Update: {
-          content_markdown?: string | null
-          content_text?: string | null
+          anchor_text?: string
+          canonical_code?: string
           created_at?: string | null
-          document_id?: string | null
           embedding?: string | null
-          header?: string | null
           id?: string
-          page_number?: number | null
-          section_number?: string | null
         }
         Relationships: [
           {
-            foreignKeyName: "document_sections_document_id_fkey"
-            columns: ["document_id"]
+            foreignKeyName: "canonical_anchors_canonical_code_fkey"
+            columns: ["canonical_code"]
             isOneToOne: false
-            referencedRelation: "source_documents"
+            referencedRelation: "canonical_sections"
+            referencedColumns: ["code"]
+          },
+        ]
+      }
+      canonical_sections: {
+        Row: {
+          code: string
+          created_at: string | null
+          description: string | null
+          name: string
+        }
+        Insert: {
+          code: string
+          created_at?: string | null
+          description?: string | null
+          name: string
+        }
+        Update: {
+          code?: string
+          created_at?: string | null
+          description?: string | null
+          name?: string
+        }
+        Relationships: []
+      }
+      deliverable_sections: {
+        Row: {
+          content_html: string | null
+          created_at: string
+          deliverable_id: string
+          id: string
+          status: string
+          template_section_id: string
+          updated_at: string
+          used_source_section_ids: string[] | null
+        }
+        Insert: {
+          content_html?: string | null
+          created_at?: string
+          deliverable_id: string
+          id?: string
+          status?: string
+          template_section_id: string
+          updated_at?: string
+          used_source_section_ids?: string[] | null
+        }
+        Update: {
+          content_html?: string | null
+          created_at?: string
+          deliverable_id?: string
+          id?: string
+          status?: string
+          template_section_id?: string
+          updated_at?: string
+          used_source_section_ids?: string[] | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "deliverable_sections_deliverable_id_fkey"
+            columns: ["deliverable_id"]
+            isOneToOne: false
+            referencedRelation: "deliverables"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "deliverable_sections_template_section_id_fkey"
+            columns: ["template_section_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
             referencedColumns: ["id"]
           },
         ]
+      }
+      deliverables: {
+        Row: {
+          created_at: string
+          id: string
+          project_id: string
+          status: string
+          template_id: string
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          project_id: string
+          status?: string
+          template_id: string
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          project_id?: string
+          status?: string
+          template_id?: string
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "deliverables_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "deliverables_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "doc_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      doc_templates: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          name: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          name?: string
+        }
+        Relationships: []
       }
       organization_members: {
         Row: {
@@ -255,30 +378,84 @@ export type Database = {
           },
         ]
       }
+      section_mappings: {
+        Row: {
+          created_at: string
+          id: string
+          instruction: string | null
+          relationship_type: string
+          source_section_id: string
+          target_section_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          instruction?: string | null
+          relationship_type: string
+          source_section_id: string
+          target_section_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          instruction?: string | null
+          relationship_type?: string
+          source_section_id?: string
+          target_section_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "section_mappings_source_section_id_fkey"
+            columns: ["source_section_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "section_mappings_target_section_id_fkey"
+            columns: ["target_section_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       source_documents: {
         Row: {
           created_at: string | null
+          detected_tables_count: number | null
           doc_type: string | null
           id: string
           name: string
+          parsing_metadata: Json | null
+          parsing_quality_comment: string | null
+          parsing_quality_score: number | null
           project_id: string | null
           status: string | null
           storage_path: string
         }
         Insert: {
           created_at?: string | null
+          detected_tables_count?: number | null
           doc_type?: string | null
           id?: string
           name: string
+          parsing_metadata?: Json | null
+          parsing_quality_comment?: string | null
+          parsing_quality_score?: number | null
           project_id?: string | null
           status?: string | null
           storage_path: string
         }
         Update: {
           created_at?: string | null
+          detected_tables_count?: number | null
           doc_type?: string | null
           id?: string
           name?: string
+          parsing_metadata?: Json | null
+          parsing_quality_comment?: string | null
+          parsing_quality_score?: number | null
           project_id?: string | null
           status?: string | null
           storage_path?: string
@@ -289,6 +466,87 @@ export type Database = {
             columns: ["project_id"]
             isOneToOne: false
             referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      source_sections: {
+        Row: {
+          canonical_code: string | null
+          classification_confidence: number | null
+          content_markdown: string | null
+          content_text: string | null
+          created_at: string | null
+          document_id: string | null
+          embedding: string | null
+          header: string | null
+          id: string
+          page_number: number | null
+          section_number: string | null
+          template_section_id: string | null
+        }
+        Insert: {
+          canonical_code?: string | null
+          classification_confidence?: number | null
+          content_markdown?: string | null
+          content_text?: string | null
+          created_at?: string | null
+          document_id?: string | null
+          embedding?: string | null
+          header?: string | null
+          id?: string
+          page_number?: number | null
+          section_number?: string | null
+          template_section_id?: string | null
+        }
+        Update: {
+          canonical_code?: string | null
+          classification_confidence?: number | null
+          content_markdown?: string | null
+          content_text?: string | null
+          created_at?: string | null
+          document_id?: string | null
+          embedding?: string | null
+          header?: string | null
+          id?: string
+          page_number?: number | null
+          section_number?: string | null
+          template_section_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "document_sections_canonical_code_fkey"
+            columns: ["canonical_code"]
+            isOneToOne: false
+            referencedRelation: "canonical_sections"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "document_sections_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "source_documents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "document_sections_template_section_id_fkey"
+            columns: ["template_section_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "source_sections_canonical_code_fkey"
+            columns: ["canonical_code"]
+            isOneToOne: false
+            referencedRelation: "canonical_sections"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "source_sections_template_section_id_fkey"
+            columns: ["template_section_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
             referencedColumns: ["id"]
           },
         ]
@@ -330,7 +588,58 @@ export type Database = {
             foreignKeyName: "study_globals_source_section_id_fkey"
             columns: ["source_section_id"]
             isOneToOne: false
-            referencedRelation: "document_sections"
+            referencedRelation: "source_sections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      template_sections: {
+        Row: {
+          created_at: string
+          description: string | null
+          embedding: string | null
+          id: string
+          is_mandatory: boolean
+          parent_id: string | null
+          section_number: string | null
+          template_id: string
+          title: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          embedding?: string | null
+          id?: string
+          is_mandatory?: boolean
+          parent_id?: string | null
+          section_number?: string | null
+          template_id: string
+          title: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          embedding?: string | null
+          id?: string
+          is_mandatory?: boolean
+          parent_id?: string | null
+          section_number?: string | null
+          template_id?: string
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "template_sections_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "template_sections"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "template_sections_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "doc_templates"
             referencedColumns: ["id"]
           },
         ]
@@ -340,6 +649,16 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_source_document: {
+        Args: {
+          p_doc_type: string
+          p_name: string
+          p_project_id: string
+          p_storage_path: string
+          p_user_id: string
+        }
+        Returns: string
+      }
       create_user_organization: {
         Args: { creator_user_id: string; org_name: string; org_slug: string }
         Returns: string
