@@ -62,11 +62,26 @@ export default async function ProjectDetailsPage({ params }: ProjectDetailsPageP
     .eq('project_id', projectId)
     .order('created_at', { ascending: false })
 
-  // Загружаем список шаблонов (doc_templates) для модальных окон
+  // Загружаем список пользовательских шаблонов (custom_templates) для модальных окон
+  // Получаем шаблоны для проекта или глобальные шаблоны (project_id IS NULL)
+  // Фильтруем только те, которые основаны на активных ideal_templates
   const { data: docTemplates } = await supabase
-    .from('doc_templates')
-    .select('*')
+    .from('custom_templates')
+    .select(`
+      *,
+      base_ideal_template:ideal_templates!custom_templates_base_ideal_template_id_fkey(
+        id,
+        name,
+        is_active
+      )
+    `)
+    .or(`project_id.eq.${projectId},project_id.is.null`)
     .order('name', { ascending: true })
+  
+  // Фильтруем только те, где базовый ideal_template активен
+  const activeDocTemplates = docTemplates?.filter(
+    (template: any) => template.base_ideal_template?.is_active === true
+  ) || []
 
   return (
     <div className="min-h-screen bg-background">
@@ -92,7 +107,7 @@ export default async function ProjectDetailsPage({ params }: ProjectDetailsPageP
         teamMembersCount={teamMembersCount || 0}
         qcTasks={[]}
         sourceDocuments={sourceDocuments || []}
-        docTemplates={docTemplates || []}
+        docTemplates={activeDocTemplates}
         projectId={projectId}
       />
     </div>

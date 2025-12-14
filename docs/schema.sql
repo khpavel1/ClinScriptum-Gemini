@@ -59,6 +59,27 @@ CREATE EXTENSION IF NOT EXISTS "vector" WITH SCHEMA "public";
 
 
 
+CREATE TYPE "public"."deliverable_section_status_enum" AS ENUM (
+    'empty',
+    'draft_ai',
+    'in_progress',
+    'review',
+    'approved'
+);
+
+
+ALTER TYPE "public"."deliverable_section_status_enum" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."input_type_enum" AS ENUM (
+    'file',
+    'manual_entry'
+);
+
+
+ALTER TYPE "public"."input_type_enum" OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."auto_assign_org_admin"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -89,6 +110,32 @@ $$;
 
 
 ALTER FUNCTION "public"."auto_assign_project_owner"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."create_deliverable_section_history"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    -- Создаем запись истории только если изменился контент или статус
+    IF OLD.content_html IS DISTINCT FROM NEW.content_html OR OLD.status IS DISTINCT FROM NEW.status THEN
+        INSERT INTO deliverable_section_history (
+            section_id,
+            content_snapshot,
+            changed_by_user_id,
+            change_reason
+        ) VALUES (
+            NEW.id,
+            NEW.content_html,
+            COALESCE(NEW.locked_by_user_id, auth.uid()),
+            'Auto-saved: ' || COALESCE(NEW.status::text, 'unknown')
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."create_deliverable_section_history"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."create_source_document"("p_project_id" "uuid", "p_name" "text", "p_storage_path" "text", "p_doc_type" "text", "p_user_id" "uuid") RETURNS "uuid"
@@ -157,7 +204,7 @@ COMMENT ON FUNCTION "public"."create_user_organization"("org_name" "text", "org_
 
 
 
-CREATE OR REPLACE FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") RETURNS "uuid"
+CREATE OR REPLACE FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
 DECLARE
@@ -168,6 +215,7 @@ BEGIN
         study_code,
         title,
         sponsor,
+        therapeutic_area,
         status,
         organization_id,
         created_by
@@ -176,6 +224,7 @@ BEGIN
         p_study_code,
         p_title,
         p_sponsor,
+        p_therapeutic_area,
         p_status,
         p_organization_id,
         p_created_by
@@ -189,10 +238,10 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") OWNER TO "postgres";
+ALTER FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") IS 'Создает проект для пользователя (обходит RLS)';
+COMMENT ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") IS 'Создает проект для пользователя (обходит RLS)';
 
 
 
@@ -291,6 +340,31 @@ COMMENT ON FUNCTION "public"."is_project_owner"("proj_id" "uuid", "check_user_id
 
 
 
+CREATE OR REPLACE FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer DEFAULT 60) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    unlocked_count INTEGER;
+BEGIN
+    UPDATE deliverable_sections
+    SET locked_by_user_id = NULL,
+        locked_at = NULL
+    WHERE locked_at IS NOT NULL
+    AND locked_at < NOW() - (timeout_minutes || ' minutes')::INTERVAL
+    RETURNING id INTO unlocked_count;
+    
+    RETURN unlocked_count;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer) IS 'Разблокирует секции, заблокированные более указанного количества минут (для очистки зависших блокировок)';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -308,58 +382,163 @@ SET default_tablespace = '';
 SET default_table_access_method = "heap";
 
 
-CREATE TABLE IF NOT EXISTS "public"."canonical_anchors" (
+CREATE TABLE IF NOT EXISTS "public"."custom_mappings" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "canonical_code" "text" NOT NULL,
-    "anchor_text" "text" NOT NULL,
-    "embedding" "public"."vector"(1536),
-    "created_at" timestamp with time zone DEFAULT "now"()
+    "target_custom_section_id" "uuid" NOT NULL,
+    "source_custom_section_id" "uuid",
+    "source_ideal_section_id" "uuid",
+    "instruction" "text",
+    "order_index" integer DEFAULT 0 NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "target_ideal_section_id" "uuid",
+    CONSTRAINT "custom_mappings_check" CHECK (((("source_custom_section_id" IS NOT NULL) AND ("source_ideal_section_id" IS NULL)) OR (("source_custom_section_id" IS NULL) AND ("source_ideal_section_id" IS NOT NULL))))
 );
 
 
-ALTER TABLE "public"."canonical_anchors" OWNER TO "postgres";
+ALTER TABLE "public"."custom_mappings" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."canonical_anchors" IS 'Справочник якорей для классификации секций документов';
-
-
-
-COMMENT ON COLUMN "public"."canonical_anchors"."anchor_text" IS 'Текст-якорь для сопоставления с секциями документов';
+COMMENT ON TABLE "public"."custom_mappings" IS 'Правила переноса данных для пользовательских шаблонов';
 
 
 
-COMMENT ON COLUMN "public"."canonical_anchors"."embedding" IS 'Векторное представление якоря для семантического поиска';
+COMMENT ON COLUMN "public"."custom_mappings"."target_custom_section_id" IS 'Целевая пользовательская секция';
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."canonical_sections" (
-    "code" "text" NOT NULL,
+COMMENT ON COLUMN "public"."custom_mappings"."source_custom_section_id" IS 'Исходная пользовательская секция (или NULL)';
+
+
+
+COMMENT ON COLUMN "public"."custom_mappings"."source_ideal_section_id" IS 'Исходная идеальная секция (или NULL, взаимоисключающее с source_custom_section_id)';
+
+
+
+COMMENT ON COLUMN "public"."custom_mappings"."instruction" IS 'Промпт для AI при трансформации данных';
+
+
+
+COMMENT ON COLUMN "public"."custom_mappings"."order_index" IS 'Порядок применения маппинга';
+
+
+
+COMMENT ON COLUMN "public"."custom_mappings"."target_ideal_section_id" IS 'Целевая идеальная секция (или NULL)';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."custom_sections" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "custom_template_id" "uuid" NOT NULL,
+    "ideal_section_id" "uuid",
+    "title" "text" NOT NULL,
+    "order_index" integer DEFAULT 0 NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "parent_id" "uuid"
+);
+
+
+ALTER TABLE "public"."custom_sections" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."custom_sections" IS 'Секции пользовательских шаблонов';
+
+
+
+COMMENT ON COLUMN "public"."custom_sections"."custom_template_id" IS 'Пользовательский шаблон';
+
+
+
+COMMENT ON COLUMN "public"."custom_sections"."ideal_section_id" IS 'Связь с идеальной секцией (может быть NULL)';
+
+
+
+COMMENT ON COLUMN "public"."custom_sections"."title" IS 'Название пользовательской секции';
+
+
+
+COMMENT ON COLUMN "public"."custom_sections"."order_index" IS 'Порядок отображения секции';
+
+
+
+COMMENT ON COLUMN "public"."custom_sections"."parent_id" IS 'Родительская секция для построения древовидной структуры';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."custom_templates" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "base_ideal_template_id" "uuid" NOT NULL,
+    "project_id" "uuid",
     "name" "text" NOT NULL,
-    "description" "text",
-    "created_at" timestamp with time zone DEFAULT "now"()
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
-ALTER TABLE "public"."canonical_sections" OWNER TO "postgres";
+ALTER TABLE "public"."custom_templates" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."canonical_sections" IS 'Справочник канонических секций документов (таксономия)';
+COMMENT ON TABLE "public"."custom_templates" IS 'Пользовательские шаблоны (Configuration) - настройки на основе идеальных шаблонов';
 
 
 
-COMMENT ON COLUMN "public"."canonical_sections"."code" IS 'Уникальный код секции (например, INCLUSION_CRITERIA)';
+COMMENT ON COLUMN "public"."custom_templates"."base_ideal_template_id" IS 'Базовый идеальный шаблон';
+
+
+
+COMMENT ON COLUMN "public"."custom_templates"."project_id" IS 'Проект (NULL для глобальных шаблонов организации)';
+
+
+
+COMMENT ON COLUMN "public"."custom_templates"."name" IS 'Название пользовательского шаблона';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."deliverable_section_history" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "section_id" "uuid" NOT NULL,
+    "content_snapshot" "text" NOT NULL,
+    "changed_by_user_id" "uuid" NOT NULL,
+    "change_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."deliverable_section_history" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."deliverable_section_history" IS 'История изменений секций готовых документов (audit trail)';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_section_history"."section_id" IS 'Секция, для которой записана история';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_section_history"."content_snapshot" IS 'Снимок HTML контента на момент изменения';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_section_history"."changed_by_user_id" IS 'Пользователь, внесший изменение';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_section_history"."change_reason" IS 'Причина изменения (AI generation, Manual edit, Review feedback и т.д.)';
 
 
 
 CREATE TABLE IF NOT EXISTS "public"."deliverable_sections" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "deliverable_id" "uuid" NOT NULL,
-    "template_section_id" "uuid" NOT NULL,
     "content_html" "text",
     "status" "text" DEFAULT 'empty'::"text" NOT NULL,
     "used_source_section_ids" "uuid"[] DEFAULT ARRAY[]::"uuid"[],
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "custom_section_id" "uuid",
+    "locked_by_user_id" "uuid",
+    "locked_at" timestamp with time zone,
+    "parent_id" "uuid",
     CONSTRAINT "deliverable_sections_status_check" CHECK (("status" = ANY (ARRAY['empty'::"text", 'generated'::"text", 'reviewed'::"text"])))
 );
 
@@ -375,19 +554,31 @@ COMMENT ON COLUMN "public"."deliverable_sections"."deliverable_id" IS 'Доку�
 
 
 
-COMMENT ON COLUMN "public"."deliverable_sections"."template_section_id" IS 'Связь с секцией шаблона (золотой стандарт)';
-
-
-
 COMMENT ON COLUMN "public"."deliverable_sections"."content_html" IS 'HTML контент секции для редактора Tiptap';
 
 
 
-COMMENT ON COLUMN "public"."deliverable_sections"."status" IS 'Статус секции: empty (пустая), generated (сгенерирована AI), reviewed (проверена)';
+COMMENT ON COLUMN "public"."deliverable_sections"."status" IS 'Статус секции в workflow: empty, draft_ai, in_progress, review, approved';
 
 
 
-COMMENT ON COLUMN "public"."deliverable_sections"."used_source_section_ids" IS 'Массив ID секций исходных документов (source_sections), использованных для генерации';
+COMMENT ON COLUMN "public"."deliverable_sections"."used_source_section_ids" IS 'Массив ID исходных секций (source_sections), использованных для генерации';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_sections"."custom_section_id" IS 'Связь с пользовательской секцией шаблона';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_sections"."locked_by_user_id" IS 'ID пользователя, заблокировавшего секцию для редактирования';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_sections"."locked_at" IS 'Время блокировки секции';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_sections"."parent_id" IS 'Родительская секция для построения древовидной структуры';
 
 
 
@@ -414,7 +605,7 @@ COMMENT ON COLUMN "public"."deliverables"."project_id" IS 'Проект, к ко
 
 
 
-COMMENT ON COLUMN "public"."deliverables"."template_id" IS 'Шаблон документа, по которому создан deliverable (например, CSR)';
+COMMENT ON COLUMN "public"."deliverables"."template_id" IS 'Пользовательский шаблон, на основе которого создан deliverable';
 
 
 
@@ -426,26 +617,110 @@ COMMENT ON COLUMN "public"."deliverables"."status" IS 'Статус докуме
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."doc_templates" (
+CREATE TABLE IF NOT EXISTS "public"."ideal_mappings" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "name" "text" NOT NULL,
-    "description" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "target_ideal_section_id" "uuid" NOT NULL,
+    "source_ideal_section_id" "uuid" NOT NULL,
+    "instruction" "text",
+    "order_index" integer DEFAULT 0 NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ideal_mappings_check" CHECK (("target_ideal_section_id" <> "source_ideal_section_id"))
 );
 
 
-ALTER TABLE "public"."doc_templates" OWNER TO "postgres";
+ALTER TABLE "public"."ideal_mappings" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."doc_templates" IS 'Типы документов (шаблоны) - золотые стандарты структур';
-
-
-
-COMMENT ON COLUMN "public"."doc_templates"."name" IS 'Уникальное имя шаблона (например, Protocol_EAEU, CSR_ICH_E3)';
+COMMENT ON TABLE "public"."ideal_mappings" IS 'Правила переноса данных между идеальными секциями';
 
 
 
-COMMENT ON COLUMN "public"."doc_templates"."description" IS 'Описание назначения шаблона';
+COMMENT ON COLUMN "public"."ideal_mappings"."target_ideal_section_id" IS 'Целевая идеальная секция';
+
+
+
+COMMENT ON COLUMN "public"."ideal_mappings"."source_ideal_section_id" IS 'Исходная идеальная секция';
+
+
+
+COMMENT ON COLUMN "public"."ideal_mappings"."instruction" IS 'Промпт для AI при трансформации данных между секциями';
+
+
+
+COMMENT ON COLUMN "public"."ideal_mappings"."order_index" IS 'Порядок применения маппинга';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."ideal_sections" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "template_id" "uuid" NOT NULL,
+    "parent_id" "uuid",
+    "title" "text" NOT NULL,
+    "order_index" integer DEFAULT 0 NOT NULL,
+    "embedding" "public"."vector"(1536),
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."ideal_sections" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."ideal_sections" IS 'Секции идеальных шаблонов (золотые стандарты структур)';
+
+
+
+COMMENT ON COLUMN "public"."ideal_sections"."template_id" IS 'Связь с идеальным шаблоном';
+
+
+
+COMMENT ON COLUMN "public"."ideal_sections"."parent_id" IS 'Родительская секция для построения древовидной структуры';
+
+
+
+COMMENT ON COLUMN "public"."ideal_sections"."title" IS 'Название секции';
+
+
+
+COMMENT ON COLUMN "public"."ideal_sections"."order_index" IS 'Порядок отображения секции в шаблоне';
+
+
+
+COMMENT ON COLUMN "public"."ideal_sections"."embedding" IS 'Векторное представление секции для семантического поиска';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."ideal_templates" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "name" "text" NOT NULL,
+    "version" integer DEFAULT 1 NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "group_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."ideal_templates" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."ideal_templates" IS 'Идеальные шаблоны (System Master Data) - золотые стандарты структур документов';
+
+
+
+COMMENT ON COLUMN "public"."ideal_templates"."name" IS 'Название идеального шаблона (например, "Protocol_EAEU", "CSR_ICH_E3")';
+
+
+
+COMMENT ON COLUMN "public"."ideal_templates"."version" IS 'Версия шаблона';
+
+
+
+COMMENT ON COLUMN "public"."ideal_templates"."is_active" IS 'Активен ли шаблон (можно отключить старые версии)';
+
+
+
+COMMENT ON COLUMN "public"."ideal_templates"."group_id" IS 'ID группы для связывания версий одного шаблона';
 
 
 
@@ -576,41 +851,6 @@ COMMENT ON COLUMN "public"."projects"."therapeutic_area" IS 'Терапевти�
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."section_mappings" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "source_section_id" "uuid" NOT NULL,
-    "target_section_id" "uuid" NOT NULL,
-    "relationship_type" "text" NOT NULL,
-    "instruction" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "section_mappings_check" CHECK (("source_section_id" <> "target_section_id")),
-    CONSTRAINT "section_mappings_relationship_type_check" CHECK (("relationship_type" = ANY (ARRAY['direct_copy'::"text", 'summary'::"text", 'transformation'::"text", 'consistency_check'::"text"])))
-);
-
-
-ALTER TABLE "public"."section_mappings" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."section_mappings" IS 'Ребра графа шаблонов - правила переноса данных между секциями';
-
-
-
-COMMENT ON COLUMN "public"."section_mappings"."source_section_id" IS 'Исходная секция шаблона';
-
-
-
-COMMENT ON COLUMN "public"."section_mappings"."target_section_id" IS 'Целевая секция шаблона';
-
-
-
-COMMENT ON COLUMN "public"."section_mappings"."relationship_type" IS 'Тип связи: direct_copy, summary, transformation, consistency_check';
-
-
-
-COMMENT ON COLUMN "public"."section_mappings"."instruction" IS 'Промпт для AI при трансформации данных между секциями';
-
-
-
 CREATE TABLE IF NOT EXISTS "public"."source_documents" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid",
@@ -622,7 +862,13 @@ CREATE TABLE IF NOT EXISTS "public"."source_documents" (
     "parsing_metadata" "jsonb" DEFAULT '{}'::"jsonb",
     "parsing_quality_score" integer,
     "parsing_quality_comment" "text",
-    "detected_tables_count" integer DEFAULT 0
+    "detected_tables_count" integer DEFAULT 0,
+    "template_id" "uuid",
+    "file_path" "text",
+    "input_type" "public"."input_type_enum" DEFAULT 'file'::"public"."input_type_enum",
+    "parent_document_id" "uuid",
+    "version_label" "text",
+    "is_current_version" boolean DEFAULT true
 );
 
 
@@ -641,6 +887,30 @@ COMMENT ON COLUMN "public"."source_documents"."parsing_quality_comment" IS 'Ко
 
 
 
+COMMENT ON COLUMN "public"."source_documents"."template_id" IS 'Пользовательский шаблон для классификации документа';
+
+
+
+COMMENT ON COLUMN "public"."source_documents"."file_path" IS 'Путь к файлу (может быть NULL для ручного ввода)';
+
+
+
+COMMENT ON COLUMN "public"."source_documents"."input_type" IS 'Тип ввода: file (файл) или manual_entry (ручной ввод)';
+
+
+
+COMMENT ON COLUMN "public"."source_documents"."parent_document_id" IS 'Родительский документ для версионирования';
+
+
+
+COMMENT ON COLUMN "public"."source_documents"."version_label" IS 'Метка версии (например, "v1.0", "v2.1")';
+
+
+
+COMMENT ON COLUMN "public"."source_documents"."is_current_version" IS 'Является ли эта версия текущей (default: true)';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."source_sections" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "document_id" "uuid",
@@ -651,8 +921,9 @@ CREATE TABLE IF NOT EXISTS "public"."source_sections" (
     "content_markdown" "text",
     "embedding" "public"."vector"(1536),
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "canonical_code" "text",
     "classification_confidence" double precision,
+    "custom_section_id" "uuid",
+    "bbox" "jsonb",
     "template_section_id" "uuid"
 );
 
@@ -664,15 +935,19 @@ COMMENT ON TABLE "public"."source_sections" IS 'Секции исходных д
 
 
 
-COMMENT ON COLUMN "public"."source_sections"."canonical_code" IS 'Ссылка на каноническую секцию из справочника';
-
-
-
 COMMENT ON COLUMN "public"."source_sections"."classification_confidence" IS 'Уверенность автоматической классификации (0.0-1.0)';
 
 
 
-COMMENT ON COLUMN "public"."source_sections"."template_section_id" IS 'Связь с идеальным прототипом секции из шаблона';
+COMMENT ON COLUMN "public"."source_sections"."custom_section_id" IS 'Связь с пользовательской секцией шаблона (custom_sections)';
+
+
+
+COMMENT ON COLUMN "public"."source_sections"."bbox" IS 'Координаты текста в формате JSONB: {"page": 1, "x": 100, "y": 200, "w": 300, "h": 50} для подсветки в PDF';
+
+
+
+COMMENT ON COLUMN "public"."source_sections"."template_section_id" IS 'Связь с пользовательской секцией шаблона (custom_sections)';
 
 
 
@@ -689,53 +964,23 @@ CREATE TABLE IF NOT EXISTS "public"."study_globals" (
 ALTER TABLE "public"."study_globals" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."template_sections" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "template_id" "uuid" NOT NULL,
-    "parent_id" "uuid",
-    "section_number" "text",
-    "title" "text" NOT NULL,
-    "description" "text",
-    "is_mandatory" boolean DEFAULT true NOT NULL,
-    "embedding" "public"."vector"(1536),
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
-);
-
-
-ALTER TABLE "public"."template_sections" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."template_sections" IS 'Узлы графа шаблонов - структура секций документа';
+ALTER TABLE ONLY "public"."custom_mappings"
+    ADD CONSTRAINT "custom_mappings_pkey" PRIMARY KEY ("id");
 
 
 
-COMMENT ON COLUMN "public"."template_sections"."parent_id" IS 'Родительская секция для построения древовидной структуры';
+ALTER TABLE ONLY "public"."custom_sections"
+    ADD CONSTRAINT "custom_sections_pkey" PRIMARY KEY ("id");
 
 
 
-COMMENT ON COLUMN "public"."template_sections"."section_number" IS 'Номер секции в шаблоне (например, "3.1")';
+ALTER TABLE ONLY "public"."custom_templates"
+    ADD CONSTRAINT "custom_templates_pkey" PRIMARY KEY ("id");
 
 
 
-COMMENT ON COLUMN "public"."template_sections"."description" IS 'Инструкция для AI о содержании секции';
-
-
-
-COMMENT ON COLUMN "public"."template_sections"."is_mandatory" IS 'Обязательная ли секция в шаблоне';
-
-
-
-COMMENT ON COLUMN "public"."template_sections"."embedding" IS 'Векторное представление секции для семантического поиска при парсинге';
-
-
-
-ALTER TABLE ONLY "public"."canonical_anchors"
-    ADD CONSTRAINT "canonical_anchors_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "public"."canonical_sections"
-    ADD CONSTRAINT "canonical_sections_pkey" PRIMARY KEY ("code");
+ALTER TABLE ONLY "public"."deliverable_section_history"
+    ADD CONSTRAINT "deliverable_section_history_pkey" PRIMARY KEY ("id");
 
 
 
@@ -749,18 +994,28 @@ ALTER TABLE ONLY "public"."deliverables"
 
 
 
-ALTER TABLE ONLY "public"."doc_templates"
-    ADD CONSTRAINT "doc_templates_name_key" UNIQUE ("name");
-
-
-
-ALTER TABLE ONLY "public"."doc_templates"
-    ADD CONSTRAINT "doc_templates_pkey" PRIMARY KEY ("id");
-
-
-
 ALTER TABLE ONLY "public"."source_sections"
     ADD CONSTRAINT "document_sections_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."ideal_mappings"
+    ADD CONSTRAINT "ideal_mappings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."ideal_sections"
+    ADD CONSTRAINT "ideal_sections_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."ideal_templates"
+    ADD CONSTRAINT "ideal_templates_name_version_key" UNIQUE ("name", "version");
+
+
+
+ALTER TABLE ONLY "public"."ideal_templates"
+    ADD CONSTRAINT "ideal_templates_pkey" PRIMARY KEY ("id");
 
 
 
@@ -809,11 +1064,6 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
-ALTER TABLE ONLY "public"."section_mappings"
-    ADD CONSTRAINT "section_mappings_pkey" PRIMARY KEY ("id");
-
-
-
 ALTER TABLE ONLY "public"."source_documents"
     ADD CONSTRAINT "source_documents_pkey" PRIMARY KEY ("id");
 
@@ -824,16 +1074,63 @@ ALTER TABLE ONLY "public"."study_globals"
 
 
 
-ALTER TABLE ONLY "public"."template_sections"
-    ADD CONSTRAINT "template_sections_pkey" PRIMARY KEY ("id");
+CREATE INDEX "idx_custom_mappings_order" ON "public"."custom_mappings" USING "btree" ("target_custom_section_id", "order_index");
 
 
 
-CREATE INDEX "idx_canonical_anchors_code" ON "public"."canonical_anchors" USING "btree" ("canonical_code");
+CREATE INDEX "idx_custom_mappings_source_custom" ON "public"."custom_mappings" USING "btree" ("source_custom_section_id");
 
 
 
-CREATE INDEX "idx_canonical_anchors_embedding" ON "public"."canonical_anchors" USING "ivfflat" ("embedding" "public"."vector_cosine_ops");
+CREATE INDEX "idx_custom_mappings_source_ideal" ON "public"."custom_mappings" USING "btree" ("source_ideal_section_id");
+
+
+
+CREATE INDEX "idx_custom_mappings_target" ON "public"."custom_mappings" USING "btree" ("target_custom_section_id");
+
+
+
+CREATE INDEX "idx_custom_mappings_target_ideal" ON "public"."custom_mappings" USING "btree" ("target_ideal_section_id");
+
+
+
+CREATE INDEX "idx_custom_sections_custom_template_id" ON "public"."custom_sections" USING "btree" ("custom_template_id");
+
+
+
+CREATE INDEX "idx_custom_sections_ideal_section_id" ON "public"."custom_sections" USING "btree" ("ideal_section_id");
+
+
+
+CREATE INDEX "idx_custom_sections_order_index" ON "public"."custom_sections" USING "btree" ("custom_template_id", "order_index");
+
+
+
+CREATE INDEX "idx_custom_sections_parent_id" ON "public"."custom_sections" USING "btree" ("parent_id");
+
+
+
+CREATE INDEX "idx_custom_templates_base_ideal" ON "public"."custom_templates" USING "btree" ("base_ideal_template_id");
+
+
+
+CREATE INDEX "idx_custom_templates_project_id" ON "public"."custom_templates" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "idx_deliverable_section_history_changed_by" ON "public"."deliverable_section_history" USING "btree" ("changed_by_user_id");
+
+
+
+CREATE INDEX "idx_deliverable_section_history_created_at" ON "public"."deliverable_section_history" USING "btree" ("created_at" DESC);
+
+
+
+CREATE INDEX "idx_deliverable_section_history_section_id" ON "public"."deliverable_section_history" USING "btree" ("section_id");
+
+
+
+CREATE INDEX "idx_deliverable_sections_custom_section_id" ON "public"."deliverable_sections" USING "btree" ("custom_section_id");
 
 
 
@@ -841,11 +1138,15 @@ CREATE INDEX "idx_deliverable_sections_deliverable_id" ON "public"."deliverable_
 
 
 
+CREATE INDEX "idx_deliverable_sections_locked_by" ON "public"."deliverable_sections" USING "btree" ("locked_by_user_id");
+
+
+
+CREATE INDEX "idx_deliverable_sections_parent_id" ON "public"."deliverable_sections" USING "btree" ("parent_id");
+
+
+
 CREATE INDEX "idx_deliverable_sections_status" ON "public"."deliverable_sections" USING "btree" ("status");
-
-
-
-CREATE INDEX "idx_deliverable_sections_template_section_id" ON "public"."deliverable_sections" USING "btree" ("template_section_id");
 
 
 
@@ -865,7 +1166,43 @@ CREATE INDEX "idx_deliverables_template_id" ON "public"."deliverables" USING "bt
 
 
 
-CREATE INDEX "idx_doc_templates_name" ON "public"."doc_templates" USING "btree" ("name");
+CREATE INDEX "idx_ideal_mappings_order" ON "public"."ideal_mappings" USING "btree" ("target_ideal_section_id", "order_index");
+
+
+
+CREATE INDEX "idx_ideal_mappings_source" ON "public"."ideal_mappings" USING "btree" ("source_ideal_section_id");
+
+
+
+CREATE INDEX "idx_ideal_mappings_target" ON "public"."ideal_mappings" USING "btree" ("target_ideal_section_id");
+
+
+
+CREATE INDEX "idx_ideal_sections_embedding" ON "public"."ideal_sections" USING "ivfflat" ("embedding" "public"."vector_cosine_ops") WHERE ("embedding" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_ideal_sections_order_index" ON "public"."ideal_sections" USING "btree" ("template_id", "order_index");
+
+
+
+CREATE INDEX "idx_ideal_sections_parent_id" ON "public"."ideal_sections" USING "btree" ("parent_id");
+
+
+
+CREATE INDEX "idx_ideal_sections_template_id" ON "public"."ideal_sections" USING "btree" ("template_id");
+
+
+
+CREATE INDEX "idx_ideal_templates_group_id" ON "public"."ideal_templates" USING "btree" ("group_id");
+
+
+
+CREATE INDEX "idx_ideal_templates_is_active" ON "public"."ideal_templates" USING "btree" ("is_active");
+
+
+
+CREATE INDEX "idx_ideal_templates_name" ON "public"."ideal_templates" USING "btree" ("name");
 
 
 
@@ -925,19 +1262,19 @@ CREATE INDEX "idx_projects_study_code" ON "public"."projects" USING "btree" ("st
 
 
 
-CREATE INDEX "idx_section_mappings_source" ON "public"."section_mappings" USING "btree" ("source_section_id");
-
-
-
-CREATE INDEX "idx_section_mappings_target" ON "public"."section_mappings" USING "btree" ("target_section_id");
-
-
-
-CREATE INDEX "idx_section_mappings_type" ON "public"."section_mappings" USING "btree" ("relationship_type");
-
-
-
 CREATE INDEX "idx_source_documents_doc_type" ON "public"."source_documents" USING "btree" ("doc_type");
+
+
+
+CREATE INDEX "idx_source_documents_input_type" ON "public"."source_documents" USING "btree" ("input_type");
+
+
+
+CREATE INDEX "idx_source_documents_is_current_version" ON "public"."source_documents" USING "btree" ("is_current_version");
+
+
+
+CREATE INDEX "idx_source_documents_parent_document_id" ON "public"."source_documents" USING "btree" ("parent_document_id");
 
 
 
@@ -949,7 +1286,15 @@ CREATE INDEX "idx_source_documents_status" ON "public"."source_documents" USING 
 
 
 
-CREATE INDEX "idx_source_sections_canonical_code" ON "public"."source_sections" USING "btree" ("canonical_code");
+CREATE INDEX "idx_source_documents_template_id" ON "public"."source_documents" USING "btree" ("template_id");
+
+
+
+CREATE INDEX "idx_source_sections_bbox" ON "public"."source_sections" USING "gin" ("bbox") WHERE ("bbox" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_source_sections_custom_section_id" ON "public"."source_sections" USING "btree" ("custom_section_id");
 
 
 
@@ -961,22 +1306,6 @@ CREATE INDEX "idx_source_sections_embedding" ON "public"."source_sections" USING
 
 
 
-CREATE INDEX "idx_source_sections_template_section_id" ON "public"."source_sections" USING "btree" ("template_section_id");
-
-
-
-CREATE INDEX "idx_template_sections_embedding" ON "public"."template_sections" USING "ivfflat" ("embedding" "public"."vector_cosine_ops");
-
-
-
-CREATE INDEX "idx_template_sections_parent_id" ON "public"."template_sections" USING "btree" ("parent_id");
-
-
-
-CREATE INDEX "idx_template_sections_template_id" ON "public"."template_sections" USING "btree" ("template_id");
-
-
-
 CREATE OR REPLACE TRIGGER "auto_assign_org_admin_trigger" AFTER INSERT ON "public"."organizations" FOR EACH ROW EXECUTE FUNCTION "public"."auto_assign_org_admin"();
 
 
@@ -985,11 +1314,31 @@ CREATE OR REPLACE TRIGGER "auto_assign_project_owner_trigger" AFTER INSERT ON "p
 
 
 
+CREATE OR REPLACE TRIGGER "deliverable_section_history_trigger" AFTER UPDATE ON "public"."deliverable_sections" FOR EACH ROW WHEN ((("old"."content_html" IS DISTINCT FROM "new"."content_html") OR ("old"."status" IS DISTINCT FROM "new"."status"))) EXECUTE FUNCTION "public"."create_deliverable_section_history"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_custom_sections_updated_at" BEFORE UPDATE ON "public"."custom_sections" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_custom_templates_updated_at" BEFORE UPDATE ON "public"."custom_templates" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
 CREATE OR REPLACE TRIGGER "update_deliverable_sections_updated_at" BEFORE UPDATE ON "public"."deliverable_sections" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
 
 
 
 CREATE OR REPLACE TRIGGER "update_deliverables_updated_at" BEFORE UPDATE ON "public"."deliverables" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_ideal_sections_updated_at" BEFORE UPDATE ON "public"."ideal_sections" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_ideal_templates_updated_at" BEFORE UPDATE ON "public"."ideal_templates" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
 
 
 
@@ -1005,8 +1354,63 @@ CREATE OR REPLACE TRIGGER "update_projects_updated_at" BEFORE UPDATE ON "public"
 
 
 
-ALTER TABLE ONLY "public"."canonical_anchors"
-    ADD CONSTRAINT "canonical_anchors_canonical_code_fkey" FOREIGN KEY ("canonical_code") REFERENCES "public"."canonical_sections"("code") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."custom_mappings"
+    ADD CONSTRAINT "custom_mappings_source_custom_section_id_fkey" FOREIGN KEY ("source_custom_section_id") REFERENCES "public"."custom_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_mappings"
+    ADD CONSTRAINT "custom_mappings_source_ideal_section_id_fkey" FOREIGN KEY ("source_ideal_section_id") REFERENCES "public"."ideal_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_mappings"
+    ADD CONSTRAINT "custom_mappings_target_custom_section_id_fkey" FOREIGN KEY ("target_custom_section_id") REFERENCES "public"."custom_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_mappings"
+    ADD CONSTRAINT "custom_mappings_target_ideal_section_id_fkey" FOREIGN KEY ("target_ideal_section_id") REFERENCES "public"."ideal_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_sections"
+    ADD CONSTRAINT "custom_sections_custom_template_id_fkey" FOREIGN KEY ("custom_template_id") REFERENCES "public"."custom_templates"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_sections"
+    ADD CONSTRAINT "custom_sections_ideal_section_id_fkey" FOREIGN KEY ("ideal_section_id") REFERENCES "public"."ideal_sections"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."custom_sections"
+    ADD CONSTRAINT "custom_sections_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."custom_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."custom_templates"
+    ADD CONSTRAINT "custom_templates_base_ideal_template_id_fkey" FOREIGN KEY ("base_ideal_template_id") REFERENCES "public"."ideal_templates"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."custom_templates"
+    ADD CONSTRAINT "custom_templates_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."deliverable_section_history"
+    ADD CONSTRAINT "deliverable_section_history_changed_by_user_id_fkey" FOREIGN KEY ("changed_by_user_id") REFERENCES "auth"."users"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."deliverable_section_history"
+    ADD CONSTRAINT "deliverable_section_history_section_id_fkey" FOREIGN KEY ("section_id") REFERENCES "public"."deliverable_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."deliverable_sections"
+    ADD CONSTRAINT "deliverable_sections_custom_section_id_fkey" FOREIGN KEY ("custom_section_id") REFERENCES "public"."custom_sections"("id") ON DELETE RESTRICT;
 
 
 
@@ -1016,7 +1420,12 @@ ALTER TABLE ONLY "public"."deliverable_sections"
 
 
 ALTER TABLE ONLY "public"."deliverable_sections"
-    ADD CONSTRAINT "deliverable_sections_template_section_id_fkey" FOREIGN KEY ("template_section_id") REFERENCES "public"."template_sections"("id") ON DELETE RESTRICT;
+    ADD CONSTRAINT "deliverable_sections_locked_by_user_id_fkey" FOREIGN KEY ("locked_by_user_id") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."deliverable_sections"
+    ADD CONSTRAINT "deliverable_sections_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."deliverable_sections"("id") ON DELETE CASCADE;
 
 
 
@@ -1026,12 +1435,7 @@ ALTER TABLE ONLY "public"."deliverables"
 
 
 ALTER TABLE ONLY "public"."deliverables"
-    ADD CONSTRAINT "deliverables_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "public"."doc_templates"("id") ON DELETE RESTRICT;
-
-
-
-ALTER TABLE ONLY "public"."source_sections"
-    ADD CONSTRAINT "document_sections_canonical_code_fkey" FOREIGN KEY ("canonical_code") REFERENCES "public"."canonical_sections"("code") ON DELETE SET NULL;
+    ADD CONSTRAINT "deliverables_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "public"."custom_templates"("id") ON DELETE RESTRICT;
 
 
 
@@ -1040,8 +1444,23 @@ ALTER TABLE ONLY "public"."source_sections"
 
 
 
-ALTER TABLE ONLY "public"."source_sections"
-    ADD CONSTRAINT "document_sections_template_section_id_fkey" FOREIGN KEY ("template_section_id") REFERENCES "public"."template_sections"("id") ON DELETE SET NULL;
+ALTER TABLE ONLY "public"."ideal_mappings"
+    ADD CONSTRAINT "ideal_mappings_source_ideal_section_id_fkey" FOREIGN KEY ("source_ideal_section_id") REFERENCES "public"."ideal_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."ideal_mappings"
+    ADD CONSTRAINT "ideal_mappings_target_ideal_section_id_fkey" FOREIGN KEY ("target_ideal_section_id") REFERENCES "public"."ideal_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."ideal_sections"
+    ADD CONSTRAINT "ideal_sections_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."ideal_sections"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."ideal_sections"
+    ADD CONSTRAINT "ideal_sections_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "public"."ideal_templates"("id") ON DELETE CASCADE;
 
 
 
@@ -1090,13 +1509,8 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
-ALTER TABLE ONLY "public"."section_mappings"
-    ADD CONSTRAINT "section_mappings_source_section_id_fkey" FOREIGN KEY ("source_section_id") REFERENCES "public"."template_sections"("id") ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."section_mappings"
-    ADD CONSTRAINT "section_mappings_target_section_id_fkey" FOREIGN KEY ("target_section_id") REFERENCES "public"."template_sections"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."source_documents"
+    ADD CONSTRAINT "source_documents_parent_document_id_fkey" FOREIGN KEY ("parent_document_id") REFERENCES "public"."source_documents"("id") ON DELETE SET NULL;
 
 
 
@@ -1105,13 +1519,13 @@ ALTER TABLE ONLY "public"."source_documents"
 
 
 
-ALTER TABLE ONLY "public"."source_sections"
-    ADD CONSTRAINT "source_sections_canonical_code_fkey" FOREIGN KEY ("canonical_code") REFERENCES "public"."canonical_sections"("code") ON DELETE SET NULL;
+ALTER TABLE ONLY "public"."source_documents"
+    ADD CONSTRAINT "source_documents_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "public"."custom_templates"("id") ON DELETE SET NULL;
 
 
 
 ALTER TABLE ONLY "public"."source_sections"
-    ADD CONSTRAINT "source_sections_template_section_id_fkey" FOREIGN KEY ("template_section_id") REFERENCES "public"."template_sections"("id") ON DELETE SET NULL;
+    ADD CONSTRAINT "source_sections_custom_section_id_fkey" FOREIGN KEY ("custom_section_id") REFERENCES "public"."custom_sections"("id") ON DELETE SET NULL;
 
 
 
@@ -1125,53 +1539,27 @@ ALTER TABLE ONLY "public"."study_globals"
 
 
 
-ALTER TABLE ONLY "public"."template_sections"
-    ADD CONSTRAINT "template_sections_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."template_sections"("id") ON DELETE CASCADE;
+CREATE POLICY "Admins can manage ideal mappings" ON "public"."ideal_mappings" USING (false) WITH CHECK (false);
 
 
 
-ALTER TABLE ONLY "public"."template_sections"
-    ADD CONSTRAINT "template_sections_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "public"."doc_templates"("id") ON DELETE CASCADE;
+CREATE POLICY "Admins can manage ideal sections" ON "public"."ideal_sections" USING (false) WITH CHECK (false);
 
 
 
-CREATE POLICY "Admins can manage canonical anchors" ON "public"."canonical_anchors" USING (false) WITH CHECK (false);
+CREATE POLICY "Admins can manage ideal templates" ON "public"."ideal_templates" USING (false) WITH CHECK (false);
 
 
 
-CREATE POLICY "Admins can manage canonical sections" ON "public"."canonical_sections" USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users can view ideal mappings" ON "public"."ideal_mappings" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
 
 
 
-CREATE POLICY "Admins can manage doc templates" ON "public"."doc_templates" USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users can view ideal sections" ON "public"."ideal_sections" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
 
 
 
-CREATE POLICY "Admins can manage section mappings" ON "public"."section_mappings" USING (false) WITH CHECK (false);
-
-
-
-CREATE POLICY "Admins can manage template sections" ON "public"."template_sections" USING (false) WITH CHECK (false);
-
-
-
-CREATE POLICY "Authenticated users can view canonical anchors" ON "public"."canonical_anchors" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
-
-
-
-CREATE POLICY "Authenticated users can view canonical sections" ON "public"."canonical_sections" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
-
-
-
-CREATE POLICY "Authenticated users can view doc templates" ON "public"."doc_templates" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
-
-
-
-CREATE POLICY "Authenticated users can view section mappings" ON "public"."section_mappings" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
-
-
-
-CREATE POLICY "Authenticated users can view template sections" ON "public"."template_sections" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
+CREATE POLICY "Authenticated users can view ideal templates" ON "public"."ideal_templates" FOR SELECT USING (("auth"."role"() = 'authenticated'::"text"));
 
 
 
@@ -1190,6 +1578,14 @@ CREATE POLICY "Org admins can update their organizations" ON "public"."organizat
 CREATE POLICY "Organization creators can add themselves" ON "public"."organization_members" FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."organizations"
   WHERE (("organizations"."id" = "organization_members"."organization_id") AND ("organizations"."created_by" = "auth"."uid"()) AND ("organization_members"."user_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "Project editors can create custom sections" ON "public"."custom_sections" FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+   FROM "public"."custom_templates"
+  WHERE (("custom_templates"."id" = "custom_sections"."custom_template_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("custom_templates"."project_id" IS NOT NULL) AND "public"."has_project_access"("custom_templates"."project_id", "auth"."uid"())))))));
 
 
 
@@ -1226,6 +1622,42 @@ CREATE POLICY "Project editors can delete deliverables" ON "public"."deliverable
 
 
 
+CREATE POLICY "Project editors can manage custom mappings" ON "public"."custom_mappings" USING ((EXISTS ( SELECT 1
+   FROM ("public"."custom_sections"
+     JOIN "public"."custom_templates" ON (("custom_templates"."id" = "custom_sections"."custom_template_id")))
+  WHERE (("custom_sections"."id" = "custom_mappings"."target_custom_section_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("custom_templates"."project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."project_members"
+          WHERE (("project_members"."project_id" = "custom_templates"."project_id") AND ("project_members"."user_id" = "auth"."uid"()) AND ("project_members"."role" = ANY (ARRAY['project_owner'::"text", 'editor'::"text"]))))))))))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM ("public"."custom_sections"
+     JOIN "public"."custom_templates" ON (("custom_templates"."id" = "custom_sections"."custom_template_id")))
+  WHERE (("custom_sections"."id" = "custom_mappings"."target_custom_section_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("custom_templates"."project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."project_members"
+          WHERE (("project_members"."project_id" = "custom_templates"."project_id") AND ("project_members"."user_id" = "auth"."uid"()) AND ("project_members"."role" = ANY (ARRAY['project_owner'::"text", 'editor'::"text"])))))))))));
+
+
+
+CREATE POLICY "Project editors can update custom sections" ON "public"."custom_sections" FOR UPDATE USING ((EXISTS ( SELECT 1
+   FROM "public"."custom_templates"
+  WHERE (("custom_templates"."id" = "custom_sections"."custom_template_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("custom_templates"."project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."project_members"
+          WHERE (("project_members"."project_id" = "custom_templates"."project_id") AND ("project_members"."user_id" = "auth"."uid"()) AND ("project_members"."role" = ANY (ARRAY['project_owner'::"text", 'editor'::"text"])))))))))));
+
+
+
+CREATE POLICY "Project editors can update custom templates" ON "public"."custom_templates" FOR UPDATE USING (((("project_id" IS NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."organization_members"
+  WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."project_members"
+  WHERE (("project_members"."project_id" = "custom_templates"."project_id") AND ("project_members"."user_id" = "auth"."uid"()) AND ("project_members"."role" = ANY (ARRAY['project_owner'::"text", 'editor'::"text"]))))))));
+
+
+
 CREATE POLICY "Project editors can update deliverable sections" ON "public"."deliverable_sections" FOR UPDATE USING ((EXISTS ( SELECT 1
    FROM ("public"."deliverables"
      JOIN "public"."project_members" ON (("project_members"."project_id" = "deliverables"."project_id")))
@@ -1255,6 +1687,12 @@ CREATE POLICY "Project editors can update sections" ON "public"."source_sections
 CREATE POLICY "Project editors can update study globals" ON "public"."study_globals" FOR UPDATE USING ((EXISTS ( SELECT 1
    FROM "public"."project_members"
   WHERE (("project_members"."project_id" = "study_globals"."project_id") AND ("project_members"."user_id" = "auth"."uid"()) AND ("project_members"."role" = ANY (ARRAY['project_owner'::"text", 'editor'::"text"]))))));
+
+
+
+CREATE POLICY "Project members can create custom templates" ON "public"."custom_templates" FOR INSERT WITH CHECK (((("project_id" IS NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."organization_members"
+  WHERE (("organization_members"."user_id" = "auth"."uid"()) AND ("organization_members"."role" = 'org_admin'::"text"))))) OR (("project_id" IS NOT NULL) AND "public"."has_project_access"("project_id", "auth"."uid"()))));
 
 
 
@@ -1334,6 +1772,38 @@ CREATE POLICY "Users can view accessible projects" ON "public"."projects" FOR SE
 
 
 
+CREATE POLICY "Users can view custom mappings" ON "public"."custom_mappings" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM ("public"."custom_sections"
+     JOIN "public"."custom_templates" ON (("custom_templates"."id" = "custom_sections"."custom_template_id")))
+  WHERE (("custom_sections"."id" = "custom_mappings"."target_custom_section_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE ("organization_members"."user_id" = "auth"."uid"())))) OR (("custom_templates"."project_id" IS NOT NULL) AND "public"."has_project_access"("custom_templates"."project_id", "auth"."uid"())))))));
+
+
+
+CREATE POLICY "Users can view custom sections" ON "public"."custom_sections" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."custom_templates"
+  WHERE (("custom_templates"."id" = "custom_sections"."custom_template_id") AND ((("custom_templates"."project_id" IS NULL) AND (EXISTS ( SELECT 1
+           FROM "public"."organization_members"
+          WHERE ("organization_members"."user_id" = "auth"."uid"())))) OR (("custom_templates"."project_id" IS NOT NULL) AND "public"."has_project_access"("custom_templates"."project_id", "auth"."uid"())))))));
+
+
+
+CREATE POLICY "Users can view custom templates" ON "public"."custom_templates" FOR SELECT USING (((("project_id" IS NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."projects"
+  WHERE ("projects"."organization_id" IN ( SELECT "organization_members"."organization_id"
+           FROM "public"."organization_members"
+          WHERE ("organization_members"."user_id" = "auth"."uid"())))))) OR (("project_id" IS NOT NULL) AND "public"."has_project_access"("project_id", "auth"."uid"()))));
+
+
+
+CREATE POLICY "Users can view deliverable section history" ON "public"."deliverable_section_history" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM ("public"."deliverable_sections"
+     JOIN "public"."deliverables" ON (("deliverables"."id" = "deliverable_sections"."deliverable_id")))
+  WHERE (("deliverable_sections"."id" = "deliverable_section_history"."section_id") AND "public"."has_project_access"("deliverables"."project_id", "auth"."uid"())))));
+
+
+
 CREATE POLICY "Users can view members of accessible projects" ON "public"."project_members" FOR SELECT USING ("public"."has_project_access"("project_id", "auth"."uid"()));
 
 
@@ -1354,10 +1824,16 @@ CREATE POLICY "Users can view their own profile" ON "public"."profiles" FOR SELE
 
 
 
-ALTER TABLE "public"."canonical_anchors" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."custom_mappings" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."canonical_sections" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."custom_sections" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."custom_templates" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."deliverable_section_history" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."deliverable_sections" ENABLE ROW LEVEL SECURITY;
@@ -1366,7 +1842,13 @@ ALTER TABLE "public"."deliverable_sections" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."deliverables" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."doc_templates" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."ideal_mappings" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ideal_sections" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ideal_templates" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."organization_members" ENABLE ROW LEVEL SECURITY;
@@ -1384,9 +1866,6 @@ ALTER TABLE "public"."project_members" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."projects" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."section_mappings" ENABLE ROW LEVEL SECURITY;
-
-
 ALTER TABLE "public"."source_documents" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1394,9 +1873,6 @@ ALTER TABLE "public"."source_sections" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."study_globals" ENABLE ROW LEVEL SECURITY;
-
-
-ALTER TABLE "public"."template_sections" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -1874,6 +2350,12 @@ GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."vector", "public"."ve
 
 
 
+GRANT ALL ON FUNCTION "public"."create_deliverable_section_history"() TO "anon";
+GRANT ALL ON FUNCTION "public"."create_deliverable_section_history"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."create_deliverable_section_history"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."create_source_document"("p_project_id" "uuid", "p_name" "text", "p_storage_path" "text", "p_doc_type" "text", "p_user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."create_source_document"("p_project_id" "uuid", "p_name" "text", "p_storage_path" "text", "p_doc_type" "text", "p_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."create_source_document"("p_project_id" "uuid", "p_name" "text", "p_storage_path" "text", "p_doc_type" "text", "p_user_id" "uuid") TO "service_role";
@@ -1886,9 +2368,9 @@ GRANT ALL ON FUNCTION "public"."create_user_organization"("org_name" "text", "or
 
 
 
-GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."create_user_project"("p_study_code" "text", "p_title" "text", "p_sponsor" "text", "p_therapeutic_area" "text", "p_status" "text", "p_organization_id" "uuid", "p_created_by" "uuid") TO "service_role";
 
 
 
@@ -2273,6 +2755,12 @@ GRANT ALL ON FUNCTION "public"."subvector"("public"."vector", integer, integer) 
 
 
 
+GRANT ALL ON FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."unlock_stale_deliverable_sections"("timeout_minutes" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "service_role";
@@ -2462,15 +2950,27 @@ GRANT ALL ON FUNCTION "public"."sum"("public"."vector") TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."canonical_anchors" TO "anon";
-GRANT ALL ON TABLE "public"."canonical_anchors" TO "authenticated";
-GRANT ALL ON TABLE "public"."canonical_anchors" TO "service_role";
+GRANT ALL ON TABLE "public"."custom_mappings" TO "anon";
+GRANT ALL ON TABLE "public"."custom_mappings" TO "authenticated";
+GRANT ALL ON TABLE "public"."custom_mappings" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."canonical_sections" TO "anon";
-GRANT ALL ON TABLE "public"."canonical_sections" TO "authenticated";
-GRANT ALL ON TABLE "public"."canonical_sections" TO "service_role";
+GRANT ALL ON TABLE "public"."custom_sections" TO "anon";
+GRANT ALL ON TABLE "public"."custom_sections" TO "authenticated";
+GRANT ALL ON TABLE "public"."custom_sections" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."custom_templates" TO "anon";
+GRANT ALL ON TABLE "public"."custom_templates" TO "authenticated";
+GRANT ALL ON TABLE "public"."custom_templates" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."deliverable_section_history" TO "anon";
+GRANT ALL ON TABLE "public"."deliverable_section_history" TO "authenticated";
+GRANT ALL ON TABLE "public"."deliverable_section_history" TO "service_role";
 
 
 
@@ -2486,9 +2986,21 @@ GRANT ALL ON TABLE "public"."deliverables" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."doc_templates" TO "anon";
-GRANT ALL ON TABLE "public"."doc_templates" TO "authenticated";
-GRANT ALL ON TABLE "public"."doc_templates" TO "service_role";
+GRANT ALL ON TABLE "public"."ideal_mappings" TO "anon";
+GRANT ALL ON TABLE "public"."ideal_mappings" TO "authenticated";
+GRANT ALL ON TABLE "public"."ideal_mappings" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ideal_sections" TO "anon";
+GRANT ALL ON TABLE "public"."ideal_sections" TO "authenticated";
+GRANT ALL ON TABLE "public"."ideal_sections" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ideal_templates" TO "anon";
+GRANT ALL ON TABLE "public"."ideal_templates" TO "authenticated";
+GRANT ALL ON TABLE "public"."ideal_templates" TO "service_role";
 
 
 
@@ -2522,12 +3034,6 @@ GRANT ALL ON TABLE "public"."projects" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."section_mappings" TO "anon";
-GRANT ALL ON TABLE "public"."section_mappings" TO "authenticated";
-GRANT ALL ON TABLE "public"."section_mappings" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."source_documents" TO "anon";
 GRANT ALL ON TABLE "public"."source_documents" TO "authenticated";
 GRANT ALL ON TABLE "public"."source_documents" TO "service_role";
@@ -2543,12 +3049,6 @@ GRANT ALL ON TABLE "public"."source_sections" TO "service_role";
 GRANT ALL ON TABLE "public"."study_globals" TO "anon";
 GRANT ALL ON TABLE "public"."study_globals" TO "authenticated";
 GRANT ALL ON TABLE "public"."study_globals" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."template_sections" TO "anon";
-GRANT ALL ON TABLE "public"."template_sections" TO "authenticated";
-GRANT ALL ON TABLE "public"."template_sections" TO "service_role";
 
 
 

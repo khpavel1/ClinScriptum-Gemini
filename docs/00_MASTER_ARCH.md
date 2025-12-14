@@ -19,32 +19,43 @@
     *   Базовый класс: `BaseParser` (абстрактный интерфейс)
     *   Реализации: `DoclingParser` (по умолчанию), `AzureParser` (планируется)
     *   Поддержка переключения парсера без изменения логики работы с БД
-*   **Content Generation:** Сервис `ContentWriter` для генерации черновиков секций документов:
-    *   Использует Template Graph для поиска правил маппинга
+*   **Content Generation:** Сервисы генерации контента (`Writer`, `SectionWriter`, `ContentWriter`):
+    *   `Writer` - основной сервис для генерации секций на основе пользовательских шаблонов (custom_templates)
+    *   Использует двухуровневую архитектуру шаблонов (Ideal/Custom) для поиска правил маппинга
     *   Интегрирует глобальный контекст исследования (Study Globals)
     *   Возвращает результат с метаданными для Audit Trail (`GenerationResult`)
+    *   Автоматически создает записи истории изменений (`deliverable_section_history`)
 *   **LLM:** **YandexGPT Pro** (API) или **Qwen 2.5** (Self-hosted vLLM).
 *   **Orchestration:** LangChain / LiteLLM.
 
 ## Глобальная Архитектура БД (High Level)
-Схема адаптирована под структурный RAG и глобальный контекст.
+Схема адаптирована под структурный RAG и глобальный контекст с двухуровневой системой шаблонов.
 
 1.  **Organizations & Users:** Стандартная схема Supabase (RBAC).
 2.  **Projects:** Исследования.
-3.  **SourceDocuments:** Метаданные файлов.
+3.  **SourceDocuments:** Метаданные файлов с поддержкой версионирования (`parent_document_id`, `is_current_version`).
 4.  **SourceSections (Вместо RagChunks):**
     *   Хранит структуру: Заголовок, Номер секции, Контент (Markdown), Таблицы.
     *   Поле `embedding` (vector) для гибридного поиска.
-5.  **Deliverables & DeliverableSections:**
-    *   Готовые документы (Outputs), созданные на основе шаблонов.
-    *   DeliverableSection содержит HTML контент для редактора и ссылки на использованные source_sections.
-5.  **StudyGlobals (Global Context):**
+    *   Связь с пользовательскими шаблонами через `custom_section_id` (custom_sections).
+5.  **Двухуровневая система шаблонов:**
+    *   **Ideal Templates (System Master Data):** Золотые стандарты структур (`ideal_templates`, `ideal_sections`, `ideal_mappings`).
+    *   **Custom Templates (Configuration):** Пользовательские настройки на основе идеальных (`custom_templates`, `custom_sections`, `custom_mappings`).
+    *   Могут быть глобальными для организации или специфичными для проекта.
+6.  **Deliverables & DeliverableSections:**
+    *   Готовые документы (Outputs), созданные на основе пользовательских шаблонов.
+    *   DeliverableSection содержит HTML контент для редактора, workflow статусы (`empty`, `draft_ai`, `in_progress`, `review`, `approved`) и ссылки на использованные source_sections.
+    *   Поддержка блокировок (`locked_by_user_id`, `locked_at`) и истории изменений (`deliverable_section_history`).
+7.  **StudyGlobals (Global Context):**
     *   "Паспорт исследования": Фаза, Препарат, Популяция и т.д.
     *   Извлекается автоматически из Синопсиса.
-6.  **MappingRules:** Правила переноса данных (Протокол -> CSR).
+    *   Ссылка на исходную секцию через `source_section_id`.
 
 ## Принципы Разработки
 1.  **Structure First:** Мы не режем текст на случайные куски. Мы парсим структуру документа (Заголовки, Таблицы).
 2.  **Global Understanding:** Перед генерацией любой секции в контекст подается "Паспорт исследования".
 3.  **Hybrid Processing:** Next.js управляет UI, Python управляет данными и AI.
 4.  **Extensibility:** Архитектура парсеров позволяет легко добавлять новые реализации (Azure, Surya и т.д.) без изменения основной логики.
+5.  **Two-Level Template System:** Разделение на идеальные шаблоны (золотые стандарты) и пользовательские шаблоны (настройки проектов).
+6.  **Versioning & Audit Trail:** Поддержка версионирования документов и полная история изменений секций для отслеживаемости.
+7.  **Workflow Management:** Четкий workflow статусов секций с блокировками для предотвращения конфликтов редактирования.

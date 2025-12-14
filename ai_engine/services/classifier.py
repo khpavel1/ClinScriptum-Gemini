@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
 
-from models import TemplateSection
+from models import CustomSection, IdealSection
 from services.llm import LLMClient
 
 
@@ -36,15 +36,15 @@ class SectionClassifier:
         template_id: UUID
     ) -> Optional[UUID]:
         """
-        Классифицирует секцию документа, привязывая её к секции шаблона.
+        Классифицирует секцию документа, привязывая её к секции пользовательского шаблона.
         
         Args:
             session: SQLAlchemy асинхронная сессия
             header_text: Текст заголовка секции документа
-            template_id: UUID шаблона документа
+            template_id: UUID пользовательского шаблона (custom_template_id)
             
         Returns:
-            UUID секции шаблона, если найдена подходящая (similarity > 0.85), иначе None
+            UUID секции пользовательского шаблона (custom_section_id), если найдена подходящая (similarity > 0.85), иначе None
         """
         if not header_text or not header_text.strip():
             return None
@@ -57,21 +57,23 @@ class SectionClassifier:
             print(f"Ошибка при получении эмбеддинга для заголовка '{header_text}': {str(e)}")
             return None
         
-        # Ищем ближайшую секцию в шаблоне через векторный поиск
+        # Ищем ближайшую секцию в пользовательском шаблоне через векторный поиск
+        # Сначала ищем в custom_sections, если нет эмбеддингов - ищем через ideal_sections
         # Используем cosine similarity (1 - cosine_distance)
         query = (
             select(
-                TemplateSection.id,
-                TemplateSection.title,
-                # Вычисляем cosine similarity: 1 - cosine_distance
-                (1 - func.cosine_distance(TemplateSection.embedding, header_embedding)).label("similarity")
+                CustomSection.id,
+                CustomSection.title,
+                # Вычисляем cosine similarity через ideal_section.embedding
+                (1 - func.cosine_distance(IdealSection.embedding, header_embedding)).label("similarity")
             )
+            .join(IdealSection, CustomSection.ideal_section_id == IdealSection.id)
             .where(
-                TemplateSection.template_id == template_id,
-                TemplateSection.embedding.isnot(None)
+                CustomSection.custom_template_id == template_id,
+                IdealSection.embedding.isnot(None)
             )
             .order_by(
-                func.cosine_distance(TemplateSection.embedding, header_embedding)
+                func.cosine_distance(IdealSection.embedding, header_embedding)
             )
             .limit(1)
         )

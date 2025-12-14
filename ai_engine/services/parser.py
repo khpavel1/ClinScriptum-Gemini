@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from config import settings
 from database import AsyncSessionLocal
-from models import SourceSection, SourceDocument, TemplateSection
+from models import SourceSection, SourceDocument
 from services import DoclingParser, Section
 from services.llm import LLMClient
 from services.classifier import SectionClassifier
@@ -150,10 +150,11 @@ async def process_document(
         
         result_sections = []
         for section in sections:
-            # Классифицируем секцию, если указан template_id
-            template_section_id = None
+            # Классифицируем секцию, если указан template_id (custom_template_id)
+            # custom_section_id теперь ссылается на custom_section_id
+            custom_section_id = None
             if template_uuid and section.header:
-                template_section_id = await classifier.classify_section(
+                custom_section_id = await classifier.classify_section(
                     session, section.header, template_uuid
                 )
             
@@ -161,7 +162,7 @@ async def process_document(
                 "header": section.header,
                 "content": section.content_markdown or section.content_text or "",
                 "page": section.page_number,
-                "template_section_id": str(template_section_id) if template_section_id else None
+                "custom_section_id": str(custom_section_id) if custom_section_id else None
             })
         
         # Сохраняем секции в БД
@@ -243,9 +244,9 @@ async def _save_sections_to_db(
     # Создаем записи для каждой секции
     for section in sections:
         # Классифицируем секцию, если указан template_id и classifier
-        template_section_id = None
+        custom_section_id = None
         if template_id and classifier and section.header:
-            template_section_id = await classifier.classify_section(
+            custom_section_id = await classifier.classify_section(
                 session, section.header, template_id
             )
         
@@ -266,7 +267,7 @@ async def _save_sections_to_db(
         
         db_section = SourceSection(
             document_id=doc_uuid,
-            template_section_id=template_section_id,
+            custom_section_id=custom_section_id,
             section_number=section.section_number,
             header=section.header,
             page_number=section.page_number,

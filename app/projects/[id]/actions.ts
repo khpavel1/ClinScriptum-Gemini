@@ -434,12 +434,12 @@ export async function createDeliverableAction(formData: FormData) {
   const data = validationResult.data
 
   try {
-    // Get all template sections for the selected template
-    const { data: templateSections, error: sectionsError } = await supabase
-      .from('template_sections')
-      .select('id, title, section_number, parent_id, is_mandatory')
-      .eq('template_id', data.templateId)
-      .order('section_number', { ascending: true })
+    // Get all custom sections for the selected custom template
+    const { data: customSections, error: sectionsError } = await supabase
+      .from('custom_sections')
+      .select('id, title, order_index')
+      .eq('custom_template_id', data.templateId)
+      .order('order_index', { ascending: true })
 
     if (sectionsError) {
       return {
@@ -447,7 +447,7 @@ export async function createDeliverableAction(formData: FormData) {
       }
     }
 
-    if (!templateSections || templateSections.length === 0) {
+    if (!customSections || customSections.length === 0) {
       return {
         error: 'Шаблон не содержит секций',
       }
@@ -471,13 +471,13 @@ export async function createDeliverableAction(formData: FormData) {
       }
     }
 
-    // Create deliverable_sections based on template_sections
-    const deliverableSections = templateSections.map((section) => ({
+    // Create deliverable_sections based on custom_sections
+    const deliverableSections = customSections.map((section) => ({
       deliverable_id: deliverable.id,
-      template_section_id: section.id,
+      custom_section_id: section.id,
       content_html: null,
       status: 'empty',
-      used_source_section_ids: null,
+      used_source_section_ids: [],
     }))
 
     const { error: sectionsInsertError } = await supabase

@@ -13,12 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import init_db, close_db, get_db
-from models import DocTemplate, TemplateSection
+from models import IdealTemplate, CustomTemplate, DeliverableSection
 from services import DoclingParser, Section
 from services.parser import process_document
 from services.llm import LLMClient
 from services.extractor import GlobalExtractor
-from services.writer import SectionWriter
+from services.writer import Writer
 from sqlalchemy import select
 
 
@@ -252,14 +252,26 @@ async def generate_section(
         
         # Инициализируем сервисы
         llm_client = LLMClient()
-        writer = SectionWriter(llm_client)
+        writer = Writer(llm_client)
         
-        # Генерируем секцию
-        content = await writer.generate_target_section(
+        # Получаем deliverable_section для генерации
+        from models import DeliverableSection
+        deliverable_section_result = await db.execute(
+            select(DeliverableSection).where(
+                DeliverableSection.deliverable_id == deliverable_uuid,
+                DeliverableSection.id == target_section_uuid
+            )
+        )
+        deliverable_section = deliverable_section_result.scalar_one_or_none()
+        
+        if not deliverable_section:
+            raise HTTPException(status_code=404, detail="Deliverable section not found")
+        
+        # Генерируем секцию используя новый метод
+        content = await writer.generate_section(
             session=db,
-            project_id=project_uuid,
-            target_template_section_id=target_section_uuid,
-            deliverable_id=deliverable_uuid
+            deliverable_section_id=target_section_uuid,
+            changed_by_user_id=project_uuid  # TODO: получить реальный user_id из запроса
         )
         
         return GenerateResponse(
@@ -275,51 +287,8 @@ async def generate_section(
         )
 
 
-@app.get("/templates", response_model=List[TemplateResponse])
-async def get_templates(db: AsyncSession = Depends(get_db)):
-    """
-    Возвращает список доступных шаблонов документов.
-    
-    Args:
-        db: SQLAlchemy асинхронная сессия
-        
-    Returns:
-        Список шаблонов с их секциями
-    """
-    try:
-        # Получаем все шаблоны
-        result = await db.execute(select(DocTemplate))
-        templates = result.scalars().all()
-        
-        templates_response = []
-        for template in templates:
-            # Получаем секции шаблона
-            sections_result = await db.execute(
-                select(TemplateSection).where(TemplateSection.template_id == template.id)
-            )
-            sections = sections_result.scalars().all()
-            
-            templates_response.append(TemplateResponse(
-                id=str(template.id),
-                name=template.name,
-                description=template.description,
-                sections=[
-                    {
-                        "id": str(section.id),
-                        "title": section.title,
-                        "section_number": section.section_number,
-                        "is_mandatory": section.is_mandatory
-                    }
-                    for section in sections
-                ]
-            ))
-        
-        return templates_response
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка при получении шаблонов: {str(e)}"
-        )
+# Эндпоинт /templates удален - используйте ideal_templates или custom_templates напрямую
+# Для получения списка шаблонов используйте соответствующие таблицы через Supabase клиент
 
 
 if __name__ == "__main__":

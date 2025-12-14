@@ -51,7 +51,8 @@ app/
 │   └── actions.ts              # Server Actions для дашборда
 └── projects/                   # Управление проектами
     └── [id]/                   # Динамический маршрут для проекта
-        └── page.tsx            # Страница проекта
+        ├── page.tsx            # Страница проекта (использует ProjectView)
+        └── actions.ts          # Server Actions для работы с проектом
 ```
 
 **Описание файлов:**
@@ -61,7 +62,10 @@ app/
 - `login/actions.ts` - серверные действия для обработки аутентификации
 - `dashboard/page.tsx` - главная страница дашборда после входа
 - `dashboard/actions.ts` - серверные действия для работы с дашбордом
-- `projects/[id]/page.tsx` - динамическая страница для просмотра и редактирования проекта
+- `projects/[id]/page.tsx` - динамическая страница для просмотра и редактирования проекта, использует компонент `ProjectView`
+- `projects/[id]/actions.ts` - серверные действия для работы с проектом:
+  - `uploadSourceAction` - загрузка исходных документов в Supabase Storage и запуск парсинга через AI Engine
+  - `createDeliverableAction` - создание нового документа (deliverable) на основе шаблона с автоматическим созданием пустых секций
 
 ### `components/` - React компоненты
 
@@ -84,17 +88,23 @@ components/
 │
 ├── login-form.tsx              # Форма входа
 ├── create-project-dialog.tsx   # Диалог создания проекта
+├── project-view.tsx            # Основной компонент отображения проекта
 ├── project-header.tsx          # Заголовок проекта
 ├── project-overview-tab.tsx    # Вкладка обзора проекта
 ├── project-documents-tab.tsx  # Вкладка документов проекта
 ├── project-source-documents-tab.tsx  # Вкладка исходных документов
 ├── project-qc-issues-tab.tsx  # Вкладка проблем контроля качества
 ├── project-settings-tab.tsx   # Вкладка настроек проекта
-└── project-filter.tsx          # Фильтр проектов
+├── project-filter.tsx          # Фильтр проектов
+├── create-deliverable-modal.tsx  # Модальное окно создания документа
+└── upload-source-modal.tsx     # Модальное окно загрузки исходного документа
 ```
 
 **Описание:**
 - `ui/` - переиспользуемые UI компоненты на основе shadcn/ui и Radix UI
+- `project-view.tsx` - основной компонент для отображения проекта, объединяет все вкладки и модальные окна
+- `create-deliverable-modal.tsx` - модальное окно для создания новых документов (deliverables) на основе шаблонов
+- `upload-source-modal.tsx` - модальное окно для загрузки исходных документов (Protocol, SAP и т.д.) с поддержкой drag-and-drop
 - Остальные компоненты - специфичные для приложения компоненты, связанные с проектами и аутентификацией
 
 ### `lib/` - Утилиты и библиотеки
@@ -157,8 +167,11 @@ ai_engine/
 
 - `main.py` - главный файл FastAPI приложения:
   - Настройка CORS
-  - Определение API эндпоинтов
-  - Управление жизненным циклом приложения
+  - Определение API эндпоинтов:
+    - `POST /api/v1/parse` - запуск парсинга документа в фоне с сохранением в БД
+    - `POST /generate` - генерация секции документа на основе Template Graph
+    - `GET /health` - проверка работоспособности сервиса
+  - Управление жизненным циклом приложения (lifespan)
   - Интеграция всех сервисов
 
 - `config.py` - конфигурация:
@@ -172,8 +185,13 @@ ai_engine/
   - Подключение к PostgreSQL
 
 - `models.py` - SQLAlchemy ORM модели:
-  - Модели таблиц базы данных
-  - Связи между таблицами
+  - Модели таблиц базы данных с поддержкой Template Graph Architecture:
+    - **Ideal Layer:** `IdealTemplate`, `IdealSection`, `IdealMapping`
+    - **Custom Layer:** `CustomTemplate`, `CustomSection`, `CustomMapping`
+    - **Source Layer:** `SourceDocument`, `SourceSection`, `StudyGlobal`
+    - **Deliverable Layer:** `Deliverable`, `DeliverableSection`, `DeliverableSectionHistory`
+  - Связи между таблицами через SQLAlchemy relationships
+  - Поддержка pgvector для векторных полей (embeddings)
 
 - `services/base_parser.py` - абстрактный базовый класс для парсеров документов
 
@@ -187,7 +205,17 @@ ai_engine/
 
 - `services/llm.py` - клиент для взаимодействия с языковыми моделями (YandexGPT Pro или Qwen 2.5)
 
-- `services/writer.py` - генерация текста секций документов с использованием LLM
+- `services/writer.py` - генерация текста секций документов с использованием LLM:
+  - `Writer` - основной сервис генерации на основе пользовательских шаблонов (custom_templates):
+    - Метод `generate_section()` - генерирует секцию для существующей `deliverable_section`
+    - Использует двухуровневую архитектуру шаблонов (Ideal/Custom) для поиска правил маппинга
+    - Интегрирует глобальный контекст исследования (Study Globals)
+    - Автоматически создает записи истории изменений (`deliverable_section_history`)
+    - Фильтрует только актуальные версии документов (`is_current_version = TRUE`)
+  - `ContentWriter` - генератор с полной поддержкой Template Graph (рекомендуется для новых интеграций):
+    - Метод `generate_section_draft()` - генерирует черновик раздела на основе данных из Протокола
+    - Возвращает структурированный результат с метаданными для Audit Trail
+  - `GenerationResult` - модель результата генерации с метаданными для Audit Trail
 
 - `services/types.py` - типы данных и модели Pydantic для сервисов
 
@@ -296,3 +324,4 @@ docs/
 - Проект использует гибридную архитектуру: легкий фронтенд на Next.js и тяжелый AI-движок на Python
 - Все изменения кода должны сопровождаться обновлением документации в `docs/`
 - Документация пишется на русском языке, комментарии в Python коде - на английском
+

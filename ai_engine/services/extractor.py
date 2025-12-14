@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
-from models import SourceSection, StudyGlobal, TemplateSection, DocTemplate, SourceDocument
+from models import SourceSection, StudyGlobal, SourceDocument
 from services.llm import LLMClient
 
 
@@ -42,66 +42,36 @@ class GlobalExtractor:
         Returns:
             Словарь с глобальными переменными: {variable_name: variable_value}
         """
-        # Находим шаблон "Протокол" (Protocol)
-        protocol_template_result = await session.execute(
-            select(DocTemplate).where(DocTemplate.name.ilike("%protocol%"))
+        # Ищем секции с "Synopsis" в заголовке или первые 5 секций документов проекта
+        # Используем прямую фильтрацию по заголовкам, без привязки к устаревшим шаблонам
+        sections_query = (
+            select(SourceSection)
+            .join(SourceDocument, SourceSection.document_id == SourceDocument.id)
+            .where(
+                SourceDocument.project_id == project_id,
+                SourceDocument.is_current_version == True
+            )
+            .where(
+                SourceSection.header.ilike("%synopsis%")
+            )
+            .limit(5)
         )
-        protocol_template = protocol_template_result.scalar_one_or_none()
         
-        if not protocol_template:
-            # Если шаблон не найден, ищем секции с "Synopsis" в заголовке
+        # Если не найдено секций с Synopsis, берем первые 5 секций документов проекта
+        sections_result = await session.execute(sections_query)
+        sections = sections_result.scalars().all()
+        
+        if not sections:
             sections_query = (
                 select(SourceSection)
                 .join(SourceDocument, SourceSection.document_id == SourceDocument.id)
                 .where(
                     SourceDocument.project_id == project_id,
-                    SourceSection.header.ilike("%synopsis%")
+                    SourceDocument.is_current_version == True
                 )
+                .order_by(SourceSection.section_number)
                 .limit(5)
             )
-        else:
-            # Находим секции шаблона "Synopsis" или первые 5 секций протокола
-            synopsis_sections_result = await session.execute(
-                select(TemplateSection)
-                .where(
-                    and_(
-                        TemplateSection.template_id == protocol_template.id,
-                        TemplateSection.title.ilike("%synopsis%")
-                    )
-                )
-            )
-            synopsis_template_sections = synopsis_sections_result.scalars().all()
-            
-            if synopsis_template_sections:
-                # Находим документные секции, привязанные к секциям Synopsis
-                template_section_ids = [ts.id for ts in synopsis_template_sections]
-                sections_query = (
-                    select(SourceSection)
-                    .join(SourceDocument, SourceSection.document_id == SourceDocument.id)
-                    .where(
-                        SourceDocument.project_id == project_id,
-                        SourceSection.template_section_id.in_(template_section_ids)
-                    )
-                )
-            else:
-                # Берем первые 5 секций протокола
-                first_template_sections_result = await session.execute(
-                    select(TemplateSection)
-                    .where(TemplateSection.template_id == protocol_template.id)
-                    .order_by(TemplateSection.section_number)
-                    .limit(5)
-                )
-                first_template_sections = first_template_sections_result.scalars().all()
-                template_section_ids = [ts.id for ts in first_template_sections]
-                
-                sections_query = (
-                    select(SourceSection)
-                    .join(SourceDocument, SourceSection.document_id == SourceDocument.id)
-                    .where(
-                        SourceDocument.project_id == project_id,
-                        SourceSection.template_section_id.in_(template_section_ids)
-                    )
-                )
         
         sections_result = await session.execute(sections_query)
         sections = sections_result.scalars().all()

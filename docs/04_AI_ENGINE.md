@@ -149,36 +149,62 @@ POST /generate
 
 #### Сервис Генератора (`services/writer.py`)
 
-**Класс `SectionWriter`** - генерирует секции документов:
-*   `generate_target_section(session, project_id, target_section_id, deliverable_id) -> str` - генерирует целевую секцию на основе Template Graph
-*   Ищет исходные данные в таблице `source_sections`
-*   Сохраняет результат в таблицу `deliverable_sections`:
-     - Записывает сгенерированный текст в поле `content_html`
-     - Обновляет статус секции на `generated`
-     - Сохраняет ID использованных исходных секций в `used_source_section_ids`
-*   Возвращает сгенерированный текст секции в формате Markdown
-*   Используется в эндпоинте `POST /generate`
+В модуле `writer.py` определены три основных класса для генерации секций документов:
 
-**Класс `ContentWriter`** - сервис генерации контента на основе Template Graph и глобального контекста (рекомендуется):
-*   `generate_section_draft(project_id, target_template_section_id, session) -> GenerationResult` - генерирует черновик раздела (например, для CSR) на основе данных из Протокола
+**Класс `Writer`** - основной сервис генерации секций на основе Template Graph:
+*   `generate_section(session, deliverable_section_id, changed_by_user_id) -> str` - генерирует секцию для существующей `deliverable_section`
+*   Процесс работы:
+    1. **Context Resolution:** Находит правила маппинга (custom_mappings или ideal_mappings) для custom_section:
+       - Сначала проверяет `custom_mappings` где `target_custom_section_id = custom_section.id`
+       - Если нет, идет по ссылке `ideal_section_id` и ищет в `ideal_mappings`
+    2. **Data Retrieval:** Находит исходные секции документов с фильтром `is_current_version = TRUE`:
+       - Фильтрует только актуальные версии документов
+       - Для каждого маппинга находит секции с соответствующим `custom_section_id`
+       - Обрабатывает `manual_entry` так же, как обычные файлы
+    3. **Global Context:** Собирает глобальные переменные из `study_globals` (Паспорт исследования)
+    4. **Generation:** Формирует промпты (System + User), вызывает LLM, преобразует Markdown в HTML
+    5. **Update & History:** Обновляет `deliverable_sections` и создает запись истории
+*   Сохраняет результат в таблицу `deliverable_sections`:
+    - Записывает сгенерированный текст в поле `content_html` (преобразует Markdown в HTML)
+    - Обновляет статус секции на `draft_ai`
+    - Сохраняет ID использованных исходных секций в `used_source_section_ids`
+    - Создает запись в `deliverable_section_history` с причиной "AI generation"
+*   Возвращает сгенерированный текст секции в формате HTML
+
+**Примечание:** Класс `SectionWriter` удален из кода - используйте класс `Writer` вместо него. `SectionWriter` использовал устаревшие таблицы `template_sections` и `section_mappings`.
+
+**Класс `ContentWriter`** - сервис генерации контента на основе Template Graph и глобального контекста (рекомендуется для новых интеграций):
+*   `generate_section_draft(project_id, target_custom_section_id, session) -> GenerationResult` - генерирует черновик раздела (например, для CSR) на основе данных из Протокола
+*   Работает с новой архитектурой шаблонов (custom_templates, custom_sections, custom_mappings)
+*   Использует фильтр `is_current_version = TRUE` для выбора актуальных версий документов
 *   Возвращает структурированный результат с метаданными для Audit Trail
 *   Более строгая обработка ошибок и валидация данных
-*   Автоматический выбор самой свежей версии документа при наличии нескольких версий
 
 **Модель `GenerationResult`** (Pydantic) - результат генерации секции:
 *   `content: str` - сгенерированный текст секции в формате Markdown
 *   `used_source_section_ids: List[UUID]` - список UUID исходных секций, использованных для генерации
 *   `mapping_logic_used: str` - описание правила маппинга, которое было применено
 
-**Алгоритм работы `ContentWriter.generate_section_draft`:**
-1. **Сбор Глобального Контекста** - извлекает переменные из `study_globals` (Phase, Drug, Population и т.д.) и формирует строку в формате Bullet-points
-2. **Обход Графа (Поиск правил)** - находит все записи в `section_mappings`, где `target_section_id == target_template_section_id`
-3. **Поиск Реального Контента (Retrieval)** - находит секции в `source_sections`, которые:
-   - Принадлежат проекту (`project_id`)
-   - Имеют `template_section_id`, совпадающий с `source_section_id` из маппинга
-   - Если найдено несколько версий документа, берется самая свежая (по `source_documents.created_at`)
-4. **Сборка Промпта** - формирует System и User промпты с глобальным контекстом, исходными данными и инструкциями трансформации
-5. **Генерация и Ответ** - вызывает LLM и возвращает `GenerationResult` с контентом и метаданными для Audit Trail
+**Алгоритм работы `Writer.generate_section`:**
+1. **Context Resolution** - находит правила маппинга:
+   - Сначала проверяет `custom_mappings` где `target_custom_section_id = custom_section.id`
+   - Если нет, идет по ссылке `ideal_section_id` и ищет в `ideal_mappings`
+   - Правила сортируются по `order_index`
+2. **Data Retrieval** - находит исходные секции документов:
+   - Фильтрует только актуальные версии (`is_current_version = TRUE`) - **критически важно**
+   - Для каждого маппинга находит секции с соответствующим `custom_section_id`
+   - Если маппинг ссылается на `source_ideal_section_id`, находит все `custom_sections` с таким `ideal_section_id`
+   - Обрабатывает `manual_entry` так же, как обычные файлы (берет текст из секции)
+   - Использует `content_markdown`, если доступен, иначе `content_text`
+3. **Global Context** - собирает глобальные переменные из `study_globals` (Паспорт исследования) и преобразует в строку формата Bullet-points
+4. **Generation** - формирует промпты:
+   - **System Message:** Роль медицинского писателя + глобальные данные исследования (строго соблюдать факты)
+   - **User Message:** Исходные данные из Протокола/SAP (заголовок + контент) + инструкции трансформации из маппингов
+   - Вызывает LLM с параметрами: `temperature=0.7`, `max_tokens=3000`
+5. **Update & History** - обновляет `deliverable_sections` и создает запись истории:
+   - Преобразует Markdown в HTML (базовое преобразование)
+   - Обновляет `content_html`, `status = 'draft_ai'`, `used_source_section_ids`
+   - Создает запись в `deliverable_section_history` с `change_reason = "AI generation"`
 
 ## 2. Template Graph Architecture (Граф Шаблонов)
 
@@ -186,38 +212,62 @@ POST /generate
 
 ### 2.1 Компоненты Графа
 
-1. **Узлы (Template Sections):** Идеальные прототипы секций документов ("Золотой стандарт")
-   *   Хранятся в таблице `template_sections`
-   *   Имеют векторные представления (`embedding`) для семантического поиска
-   *   Связаны с шаблонами через `template_id`
+Система использует двухуровневую архитектуру шаблонов:
 
-2. **Ребра (Section Mappings):** Правила переноса данных между секциями
-   *   Хранятся в таблице `section_mappings`
-   *   Типы связей: `direct_copy`, `summary`, `transformation`, `consistency_check`
+1. **Идеальные шаблоны (Ideal Templates)** - золотые стандарты структур:
+   *   `ideal_templates` - идеальные шаблоны с версионированием
+   *   `ideal_sections` - секции идеальных шаблонов
+   *   `ideal_mappings` - правила переноса данных между идеальными секциями
+   *   Имеют векторные представления (`embedding`) для семантического поиска
+
+2. **Пользовательские шаблоны (Custom Templates)** - настройки на основе идеальных:
+   *   `custom_templates` - пользовательские шаблоны (могут быть глобальными для организации или специфичными для проекта)
+   *   `custom_sections` - секции пользовательских шаблонов (связь с `ideal_section_id`)
+   *   `custom_mappings` - правила переноса данных для пользовательских шаблонов
+   *   Могут ссылаться на `source_custom_section_id` или `source_ideal_section_id`
+
+3. **Ребра (Mappings):** Правила переноса данных между секциями
+   *   `ideal_mappings` - правила между идеальными секциями
+   *   `custom_mappings` - правила для пользовательских шаблонов
    *   Содержат инструкции для AI (`instruction`) - например, "change future to past tense"
+   *   Имеют `order_index` для определения порядка применения
 
 ### 2.2 Процесс Генерации
 
-При запросе генерации секции (`POST /generate` или через `ContentWriter.generate_section_draft`):
+При запросе генерации секции через `Writer.generate_section()`:
 
-1. **Поиск правил:** Находятся все `section_mappings`, где `target_section_id` равен запрашиваемому
-2. **Поиск источников:** Для каждого правила находятся реальные секции документов проекта, привязанные к `source_section_id`
-   *   Если найдено несколько версий документа (например, Протокол v1 и v2), берется самая свежая (по `source_documents.created_at`)
+1. **Context Resolution (Поиск правил):**
+   - Находятся все `custom_mappings`, где `target_custom_section_id` равен `custom_section.id`
+   - Если нет, ищутся `ideal_mappings` через ссылку `custom_section.ideal_section_id`
+   - Правила сортируются по `order_index`
+
+2. **Data Retrieval (Поиск источников):**
+   - Для каждого маппинга находятся реальные секции документов проекта
+   - Фильтруются только актуальные версии (`is_current_version = TRUE`)
+   - Если маппинг ссылается на `source_ideal_section_id`, находятся все `custom_sections` с таким `ideal_section_id`
+   - Обрабатываются как файлы, так и `manual_entry` документы
+
 3. **Сборка контекста:**
-   *   Загружаются глобальные переменные из `study_globals` (Паспорт исследования) и преобразуются в строку формата Bullet-points
-   *   Объединяются тексты найденных исходных секций (используется `content_markdown`, если доступен, иначе `content_text`)
+   - Загружаются глобальные переменные из `study_globals` (Паспорт исследования) и преобразуются в строку формата Bullet-points
+   - Объединяются тексты найденных исходных секций (используется `content_markdown`, если доступен, иначе `content_text`)
+
 4. **Генерация:** LLM вызывается с промптом:
    *   **System Message:** Роль медицинского писателя + глобальные данные исследования (строго соблюдать факты)
-   *   **User Message:** Исходные данные из Протокола/SAP (заголовок + контент) + инструкции трансформации из `section_mappings.instruction`
+   *   **User Message:** Исходные данные из Протокола/SAP (заголовок + контент) + инструкции трансформации из маппингов
    *   Дополнительные инструкции: анализ таблиц в Markdown, использование прошедшего времени для завершенных исследований
-5. **Результат:** Возвращается `GenerationResult` с контентом, списком использованных секций и описанием примененного правила маппинга (для Audit Trail)
+
+5. **Update & History:**
+   - Результат преобразуется из Markdown в HTML
+   - Обновляется `deliverable_section` (контент, статус `draft_ai`, `used_source_section_ids`)
+   - Создается запись в `deliverable_section_history` с причиной "AI generation"
 
 ### 2.3 Классификация Секций при Парсинге
 
-При парсинге документа с указанным `template_id`:
+При парсинге документа с указанным `template_id` (custom_template_id):
 1. Для каждой секции документа создается эмбеддинг заголовка
-2. Выполняется векторный поиск ближайшей секции в шаблоне (cosine similarity)
-3. Если similarity > 0.85, секция привязывается к шаблону через `template_section_id`
+2. Выполняется векторный поиск ближайшей секции в пользовательском шаблоне (custom_sections) через векторные представления
+3. Если similarity > 0.85, секция привязывается к шаблону через `custom_section_id` (ссылается на `custom_sections.id`)
+4. Классификация выполняется через векторный поиск по эмбеддингам секций шаблонов
 
 ## 3. Traceability
 
