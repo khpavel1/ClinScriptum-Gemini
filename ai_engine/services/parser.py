@@ -273,6 +273,7 @@ async def _save_sections_to_db(
             page_number=section.page_number,
             content_text=section.content_text,
             content_markdown=section.content_markdown,
+            content_structure=section.content_structure,
             embedding=embedding
         )
         session.add(db_section)

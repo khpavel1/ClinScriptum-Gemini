@@ -151,7 +151,7 @@ class CustomSection(Base):
     parent = relationship("CustomSection", remote_side=[id], backref="children")
     target_mappings = relationship("CustomMapping", foreign_keys="CustomMapping.target_custom_section_id", back_populates="target_section")
     source_mappings = relationship("CustomMapping", foreign_keys="CustomMapping.source_custom_section_id", back_populates="source_section")
-    source_sections = relationship("SourceSection", back_populates="template_section")
+    source_sections = relationship("SourceSection", back_populates="custom_section")
     deliverable_sections = relationship("DeliverableSection", back_populates="custom_section")
 
 
@@ -232,6 +232,7 @@ class SourceSection(Base):
     # Контент
     content_text = mapped_column(Text, nullable=True)  # Чистый текст для поиска
     content_markdown = mapped_column(Text, nullable=True)  # Текст с разметкой таблиц (для LLM)
+    content_structure = mapped_column(JSONB, nullable=True)  # Структурированное представление таблиц или сложных данных (JSON)
     
     # Вектор для гибридного поиска
     embedding = mapped_column(Vector(1536), nullable=True)
@@ -246,7 +247,7 @@ class SourceSection(Base):
     
     # Relationships
     source_document = relationship("SourceDocument", back_populates="sections")
-    template_section = relationship("CustomSection", back_populates="source_sections")
+    custom_section = relationship("CustomSection", back_populates="source_sections")
 
 
 class StudyGlobal(Base):
@@ -301,6 +302,7 @@ class DeliverableSection(Base):
     locked_by_user_id = mapped_column(UUID(as_uuid=True), nullable=True)  # FK to auth.users (cross-schema reference)
     locked_at = mapped_column(DateTime(timezone=True), nullable=True)
     used_source_section_ids = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("ARRAY[]::UUID[]"))  # Массив ссылок на source_sections
+    trace_info = mapped_column(JSONB, nullable=True)  # JSON containing logic used for generation (rule_id, source_ids, scores, mapping_type)
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
@@ -323,6 +325,7 @@ class DeliverableSectionHistory(Base):
     content_snapshot = mapped_column(Text, nullable=False)  # снимок HTML контента на момент изменения
     changed_by_user_id = mapped_column(UUID(as_uuid=True), nullable=False)  # FK to auth.users (cross-schema reference)
     change_reason = mapped_column(Text, nullable=True)  # причина изменения (например, "AI generation", "Manual edit")
+    trace_info = mapped_column(JSONB, nullable=True)  # Snapshot of trace_info at the moment of change
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     
     # Relationships

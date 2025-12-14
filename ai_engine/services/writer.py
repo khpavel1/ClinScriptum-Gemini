@@ -2,7 +2,7 @@
 Сервис для генерации секций документов на основе Template Graph.
 Использует граф связей между секциями для генерации целевых секций.
 """
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
@@ -13,6 +13,7 @@ from models import (
     SourceDocument, DeliverableSection, Deliverable, DeliverableSectionHistory
 )
 from services.llm import LLMClient
+from services.prompt_manager import PromptManager
 
 
 class Writer:
@@ -29,6 +30,7 @@ class Writer:
             llm_client: Клиент для работы с LLM
         """
         self.llm_client = llm_client
+        self.prompt_manager = PromptManager()
     
     async def generate_section(
         self,
@@ -92,7 +94,7 @@ class Writer:
             # Если нет правил, создаем пустую секцию
             empty_content = f"<h1>{custom_section.title}</h1><p>Секция требует заполнения.</p>"
             await self._update_deliverable_section(
-                session, deliverable_section, empty_content, [], changed_by_user_id
+                session, deliverable_section, empty_content, [], changed_by_user_id, None
             )
             return empty_content
         
@@ -105,7 +107,7 @@ class Writer:
             # Если нет исходных секций, создаем секцию с описанием
             empty_content = f"<h1>{custom_section.title}</h1><p>Исходные данные для генерации не найдены.</p>"
             await self._update_deliverable_section(
-                session, deliverable_section, empty_content, [], changed_by_user_id
+                session, deliverable_section, empty_content, [], changed_by_user_id, None
             )
             return empty_content
         
@@ -129,13 +131,17 @@ class Writer:
             # В продакшене лучше использовать библиотеку markdown или подобную
             content_html = self._markdown_to_html(generated_content, custom_section.title)
             
-            # Step 5: Обновляем deliverable_sections и создаем историю
+            # Step 5: Формируем trace_info для audit trail
+            trace_info = self._build_trace_info(mappings, source_content_data)
+            
+            # Step 6: Обновляем deliverable_sections и создаем историю
             await self._update_deliverable_section(
                 session,
                 deliverable_section,
                 content_html,
                 source_content_data["section_ids"],
-                changed_by_user_id
+                changed_by_user_id,
+                trace_info
             )
             
             return content_html
@@ -304,7 +310,8 @@ class Writer:
         
         return {
             "content": combined_content,
-            "section_ids": all_section_ids
+            "section_ids": all_section_ids,
+            "mappings_with_sections": all_sections  # Сохраняем информацию о маппингах для trace_info
         }
     
     async def _collect_global_context(
@@ -358,32 +365,25 @@ class Writer:
         Returns:
             Кортеж (system_prompt, user_prompt)
         """
-        instruction_text = "\n".join(instructions) if instructions else (
-            "Используй исходные данные для генерации текста. "
-            "Если видишь таблицу в Markdown, проанализируй её и опиши ключевые данные текстом. "
-            "Глаголы ставь в прошедшее время, так как исследование завершено."
+        # Получаем инструкцию из маппингов или используем дефолтную
+        if instructions:
+            instruction_text = "\n".join(instructions)
+        else:
+            instruction_text = self.prompt_manager.get_prompt("generation.default_instruction")
+        
+        # System Message из prompts.yaml
+        system_prompt = self.prompt_manager.get_prompt(
+            "generation.system_role",
+            globals_text=globals_text
         )
         
-        # System Message
-        system_prompt = f"""Ты профессиональный медицинский писатель.
-Твоя задача — написать раздел клинического документа.
-
-ГЛОБАЛЬНЫЕ ДАННЫЕ ИССЛЕДОВАНИЯ (Строго соблюдай эти факты):
-{globals_text}
-
-Важно: Используй только факты из глобальных данных исследования. Не придумывай информацию."""
-        
-        # User Message
-        user_prompt = f"""ИСХОДНЫЕ ДАННЫЕ (Из Протокола/SAP):
-
-{source_content_data["content"]}
-
-ИНСТРУКЦИЯ:
-{instruction_text}
-
-(Дополнительно: Если видишь таблицу в Markdown, проанализируй её и опиши ключевые данные текстом. Глаголы ставь в прошедшее время, так как исследование завершено.)
-
-Сгенерируй текст для секции "{custom_section.title}" в формате Markdown."""
+        # User Message из prompts.yaml
+        user_prompt = self.prompt_manager.get_prompt(
+            "generation.section_generation",
+            source_content=source_content_data["content"],
+            instruction_text=instruction_text,
+            section_title=custom_section.title
+        )
         
         return system_prompt, user_prompt
     
@@ -448,13 +448,72 @@ class Writer:
         
         return html
     
+    def _build_trace_info(
+        self,
+        mappings: List,
+        source_content_data: dict
+    ) -> Dict[str, Any]:
+        """
+        Формирует trace_info для audit trail.
+        
+        Args:
+            mappings: Список правил маппинга (CustomMapping или IdealMapping)
+            source_content_data: Словарь с данными о найденных секциях
+            
+        Returns:
+            Словарь с информацией о трассировке
+        """
+        trace_entries = []
+        
+        if "mappings_with_sections" in source_content_data:
+            # Группируем секции по маппингам
+            mapping_to_sections = {}
+            for source_section, mapping in source_content_data["mappings_with_sections"]:
+                mapping_id = str(mapping.id)
+                if mapping_id not in mapping_to_sections:
+                    mapping_to_sections[mapping_id] = {
+                        "mapping": mapping,
+                        "sections": []
+                    }
+                mapping_to_sections[mapping_id]["sections"].append(source_section.id)
+            
+            # Формируем trace entries
+            for mapping_id, data in mapping_to_sections.items():
+                mapping = data["mapping"]
+                entry = {
+                    "rule_id": str(mapping.id),
+                    "rule_type": "CustomMapping" if isinstance(mapping, CustomMapping) else "IdealMapping",
+                    "source_ids": [str(sid) for sid in data["sections"]],
+                    "order_index": mapping.order_index
+                }
+                
+                # Добавляем информацию о source section
+                if isinstance(mapping, CustomMapping):
+                    if mapping.source_custom_section_id:
+                        entry["source_custom_section_id"] = str(mapping.source_custom_section_id)
+                    if mapping.source_ideal_section_id:
+                        entry["source_ideal_section_id"] = str(mapping.source_ideal_section_id)
+                elif isinstance(mapping, IdealMapping):
+                    entry["source_ideal_section_id"] = str(mapping.source_ideal_section_id)
+                
+                if mapping.instruction:
+                    entry["instruction"] = mapping.instruction[:200]  # Ограничиваем длину
+                
+                trace_entries.append(entry)
+        
+        return {
+            "mappings": trace_entries,
+            "total_source_sections": len(source_content_data.get("section_ids", []))
+        }
+    
     async def _update_deliverable_section(
         self,
         session: AsyncSession,
         deliverable_section: DeliverableSection,
         content_html: str,
         used_source_section_ids: List[UUID],
-        changed_by_user_id: UUID
+        changed_by_user_id: UUID,
+        trace_info: Optional[Dict[str, Any]]
     ) -> None:
         """
         Обновляет deliverable_section и создает запись в истории.
@@ -465,18 +524,21 @@ class Writer:
             content_html: Сгенерированный HTML контент
             used_source_section_ids: Список ID использованных source_sections
             changed_by_user_id: UUID пользователя, инициировавшего изменение
+            trace_info: JSON с информацией о трассировке (rule_id, source_ids, scores, mapping_type)
         """
         # Обновляем deliverable_section
         deliverable_section.content_html = content_html
         deliverable_section.status = "draft_ai"
         deliverable_section.used_source_section_ids = used_source_section_ids
+        deliverable_section.trace_info = trace_info
         
         # Создаем запись в истории (снапшот того, что сгенерировал AI)
         history_entry = DeliverableSectionHistory(
             section_id=deliverable_section.id,
             content_snapshot=content_html,
             changed_by_user_id=changed_by_user_id,
-            change_reason="AI generation"
+            change_reason="AI generation",
+            trace_info=trace_info
         )
         session.add(history_entry)
         
@@ -495,10 +557,12 @@ class GenerationResult(BaseModel):
         content: Сгенерированный текст секции в формате Markdown
         used_source_section_ids: Список UUID исходных секций, использованных для генерации
         mapping_logic_used: Описание правила маппинга, которое было применено
+        trace_info: JSON с информацией о трассировке (rule_id, source_ids, scores, mapping_type)
     """
     content: str
     used_source_section_ids: List[UUID]
     mapping_logic_used: str
+    trace_info: Optional[Dict] = None
 
 
 class ContentWriter:
@@ -515,6 +579,7 @@ class ContentWriter:
             llm_client: Клиент для работы с LLM
         """
         self.llm_client = llm_client
+        self.prompt_manager = PromptManager()
     
     async def generate_section_draft(
         self,
@@ -597,10 +662,14 @@ class ContentWriter:
         
         mapping_logic_used = "; ".join(mapping_descriptions)
         
+        # Формируем trace_info для audit trail
+        trace_info = self._build_trace_info_for_content_writer(mappings, source_content_data)
+        
         return GenerationResult(
             content=generated_content,
             used_source_section_ids=source_content_data["section_ids"],
-            mapping_logic_used=mapping_logic_used
+            mapping_logic_used=mapping_logic_used,
+            trace_info=trace_info
         )
     
     async def _collect_global_context(
@@ -784,7 +853,8 @@ class ContentWriter:
         return {
             "content": combined_content,
             "headers": headers,
-            "section_ids": all_section_ids
+            "section_ids": all_section_ids,
+            "mappings_with_sections": all_sections  # Сохраняем информацию о маппингах для trace_info
         }
     
     def _build_prompts(
@@ -810,31 +880,81 @@ class ContentWriter:
             if mapping.instruction:
                 instructions.append(mapping.instruction)
         
-        instruction_text = "\n".join(instructions) if instructions else (
-            "Используй исходные данные для генерации текста. "
-            "Если видишь таблицу в Markdown, проанализируй её и опиши ключевые данные текстом. "
-            "Глаголы ставь в прошедшее время, так как исследование завершено."
+        # Получаем инструкцию из маппингов или используем дефолтную
+        if instructions:
+            instruction_text = "\n".join(instructions)
+        else:
+            instruction_text = self.prompt_manager.get_prompt("generation.default_instruction")
+        
+        # System Message из prompts.yaml
+        system_prompt = self.prompt_manager.get_prompt(
+            "generation.system_role",
+            globals_text=global_context_string
         )
         
-        # System Message
-        system_prompt = f"""Ты профессиональный медицинский писатель.
-Твоя задача — написать раздел клинического документа.
-
-ГЛОБАЛЬНЫЕ ДАННЫЕ ИССЛЕДОВАНИЯ (Строго соблюдай эти факты):
-{global_context_string}
-
-Важно: Используй только факты из глобальных данных исследования. Не придумывай информацию."""
-        
-        # User Message
-        user_prompt = f"""ИСХОДНЫЕ ДАННЫЕ (Из Протокола/SAP):
-
-{source_content_data["content"]}
-
-ИНСТРУКЦИЯ:
-{instruction_text}
-
-(Дополнительно: Если видишь таблицу в Markdown, проанализируй её и опиши ключевые данные текстом. Глаголы ставь в прошедшее время, так как исследование завершено.)
-
-Сгенерируй только текст итогового раздела (в формате Markdown)."""
+        # User Message из prompts.yaml
+        user_prompt = self.prompt_manager.get_prompt(
+            "generation.section_generation_content_writer",
+            source_content=source_content_data["content"],
+            instruction_text=instruction_text
+        )
         
         return system_prompt, user_prompt
+    
+    def _build_trace_info_for_content_writer(
+        self,
+        mappings: List,
+        source_content_data: dict
+    ) -> Dict[str, Any]:
+        """
+        Формирует trace_info для audit trail в ContentWriter.
+        
+        Args:
+            mappings: Список правил маппинга (CustomMapping или IdealMapping)
+            source_content_data: Словарь с данными о найденных секциях
+            
+        Returns:
+            Словарь с информацией о трассировке
+        """
+        trace_entries = []
+        
+        if "mappings_with_sections" in source_content_data:
+            # Группируем секции по маппингам
+            mapping_to_sections = {}
+            for doc_section, mapping in source_content_data["mappings_with_sections"]:
+                mapping_id = str(mapping.id)
+                if mapping_id not in mapping_to_sections:
+                    mapping_to_sections[mapping_id] = {
+                        "mapping": mapping,
+                        "sections": []
+                    }
+                mapping_to_sections[mapping_id]["sections"].append(doc_section.id)
+            
+            # Формируем trace entries
+            for mapping_id, data in mapping_to_sections.items():
+                mapping = data["mapping"]
+                entry = {
+                    "rule_id": str(mapping.id),
+                    "rule_type": "CustomMapping" if isinstance(mapping, CustomMapping) else "IdealMapping",
+                    "source_ids": [str(sid) for sid in data["sections"]],
+                    "order_index": mapping.order_index
+                }
+                
+                # Добавляем информацию о source section
+                if isinstance(mapping, CustomMapping):
+                    if mapping.source_custom_section_id:
+                        entry["source_custom_section_id"] = str(mapping.source_custom_section_id)
+                    if mapping.source_ideal_section_id:
+                        entry["source_ideal_section_id"] = str(mapping.source_ideal_section_id)
+                elif isinstance(mapping, IdealMapping):
+                    entry["source_ideal_section_id"] = str(mapping.source_ideal_section_id)
+                
+                if mapping.instruction:
+                    entry["instruction"] = mapping.instruction[:200]  # Ограничиваем длину
+                
+                trace_entries.append(entry)
+        
+        return {
+            "mappings": trace_entries,
+            "total_source_sections": len(source_content_data.get("section_ids", []))
+        }

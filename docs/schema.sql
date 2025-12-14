@@ -122,12 +122,14 @@ BEGIN
             section_id,
             content_snapshot,
             changed_by_user_id,
-            change_reason
+            change_reason,
+            trace_info
         ) VALUES (
             NEW.id,
             NEW.content_html,
             COALESCE(NEW.locked_by_user_id, auth.uid()),
-            'Auto-saved: ' || COALESCE(NEW.status::text, 'unknown')
+            'Auto-saved: ' || COALESCE(NEW.status::text, 'unknown'),
+            NEW.trace_info
         );
     END IF;
     RETURN NEW;
@@ -500,7 +502,8 @@ CREATE TABLE IF NOT EXISTS "public"."deliverable_section_history" (
     "content_snapshot" "text" NOT NULL,
     "changed_by_user_id" "uuid" NOT NULL,
     "change_reason" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "trace_info" "jsonb"
 );
 
 
@@ -527,6 +530,10 @@ COMMENT ON COLUMN "public"."deliverable_section_history"."change_reason" IS 'П�
 
 
 
+COMMENT ON COLUMN "public"."deliverable_section_history"."trace_info" IS 'Snapshot of trace_info at the moment of change';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."deliverable_sections" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "deliverable_id" "uuid" NOT NULL,
@@ -539,6 +546,7 @@ CREATE TABLE IF NOT EXISTS "public"."deliverable_sections" (
     "locked_by_user_id" "uuid",
     "locked_at" timestamp with time zone,
     "parent_id" "uuid",
+    "trace_info" "jsonb",
     CONSTRAINT "deliverable_sections_status_check" CHECK (("status" = ANY (ARRAY['empty'::"text", 'generated'::"text", 'reviewed'::"text"])))
 );
 
@@ -579,6 +587,10 @@ COMMENT ON COLUMN "public"."deliverable_sections"."locked_at" IS 'Время б�
 
 
 COMMENT ON COLUMN "public"."deliverable_sections"."parent_id" IS 'Родительская секция для построения древовидной структуры';
+
+
+
+COMMENT ON COLUMN "public"."deliverable_sections"."trace_info" IS 'JSON containing logic used for generation (rule_id, source_ids, scores, mapping_type)';
 
 
 
@@ -924,7 +936,8 @@ CREATE TABLE IF NOT EXISTS "public"."source_sections" (
     "classification_confidence" double precision,
     "custom_section_id" "uuid",
     "bbox" "jsonb",
-    "template_section_id" "uuid"
+    "template_section_id" "uuid",
+    "content_structure" "jsonb"
 );
 
 
@@ -948,6 +961,10 @@ COMMENT ON COLUMN "public"."source_sections"."bbox" IS 'Координаты т�
 
 
 COMMENT ON COLUMN "public"."source_sections"."template_section_id" IS 'Связь с пользовательской секцией шаблона (custom_sections)';
+
+
+
+COMMENT ON COLUMN "public"."source_sections"."content_structure" IS 'Structured representation of tables or complex data from Docling (JSON format)';
 
 
 

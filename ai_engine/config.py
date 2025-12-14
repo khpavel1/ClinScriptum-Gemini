@@ -84,6 +84,10 @@ class Settings:
     SUPABASE_KEY: Optional[str] = os.getenv("SUPABASE_KEY")
     SUPABASE_STORAGE_BUCKET: str = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
     
+    # Celery (Redis)
+    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+    
     # Настройки приложения
     APP_NAME: str = "AI Engine"
     APP_VERSION: str = "1.0.0"

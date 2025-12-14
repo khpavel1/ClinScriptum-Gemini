@@ -2,9 +2,10 @@
 
 ## 1. Архитектура Сервиса (Python)
 *   **Framework:** FastAPI.
+*   **Task Queue:** Celery с Redis в качестве broker и backend.
 *   **Libs:** Docling (parsing), SQLAlchemy (Async) + asyncpg, pgvector (vector search), YandexGPT SDK / OpenAI-compatible client.
 *   **Logic:** Structure-RAG с поддержкой Template Graph (Граф Шаблонов).
-*   **Архитектура:** Микросервис с Dependency Injection для БД.
+*   **Архитектура:** Микросервис с Dependency Injection для БД и асинхронной обработкой задач через Celery.
 
 ### 1.1 Структура Парсеров
 *   **Модуль:** `ai_engine/services/`
@@ -61,10 +62,11 @@ POST /parse
 ```
 
 **Особенности:**
-*   Парсинг выполняется асинхронно в фоне (BackgroundTasks)
+*   Парсинг выполняется асинхронно через Celery очередь (Redis broker)
 *   Автоматическая классификация секций через векторный поиск (если указан `template_id`)
 *   Создание эмбеддингов для секций (для гибридного поиска)
 *   Сохранение метаданных парсинга (время, количество страниц) в `source_documents.parsing_metadata`
+*   Автоматические повторные попытки при ошибках (до 3 раз с задержкой 60 секунд)
 
 #### Эндпоинт `POST /generate`
 Генерирует целевую секцию документа на основе Template Graph и сохраняет результат в таблицу `deliverable_sections`.
@@ -97,27 +99,35 @@ POST /generate
    - Обновляет статус секции на `generated`
    - Сохраняет ID использованных исходных секций в `used_source_section_ids`
 
-#### Эндпоинт `GET /templates`
-Возвращает список доступных шаблонов документов с их секциями.
+#### Эндпоинт `GET /api/v1/export/{deliverable_id}`
+Экспортирует deliverable в формат DOCX используя Pandoc и возвращает файл как поток.
+
+**Параметры:**
+*   `deliverable_id` (UUID, path parameter) - UUID документа для экспорта
+*   `reference_docx` (string, query parameter, опционально) - Путь к шаблону DOCX с корпоративными стилями
 
 **Ответ:**
-```json
-[
-  {
-    "id": "uuid-шаблона",
-    "name": "Protocol_EAEU",
-    "description": "Протокол исследования (ЕАЭС)",
-    "sections": [
-      {
-        "id": "uuid-секции",
-        "title": "3.1 Study Design",
-        "section_number": "3.1",
-        "is_mandatory": true
-      }
-    ]
-  }
-]
+*   `StreamingResponse` с DOCX файлом
+*   Content-Type: `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+*   Content-Disposition: `attachment; filename="{название_документа}.docx"`
+
+**Пример использования:**
+```bash
+# Экспорт без шаблона
+GET /api/v1/export/123e4567-e89b-12d3-a456-426614174000
+
+# Экспорт с корпоративным шаблоном
+GET /api/v1/export/123e4567-e89b-12d3-a456-426614174000?reference_docx=/path/to/template.docx
 ```
+
+**Обработка ошибок:**
+*   `404` - Deliverable не найден или нет секций для экспорта
+*   `500` - Ошибка при конвертации через Pandoc или неожиданная ошибка
+
+**Особенности:**
+*   Все секции документа объединяются в правильном порядке (по `order_index`)
+*   Поддерживается применение корпоративных стилей через `reference.docx`
+*   Временные файлы автоматически очищаются после генерации
 
 ### 1.4 Сервисы
 
@@ -131,6 +141,19 @@ POST /generate
 3. **Классификация секций:** Автоматически привязывает секции к шаблону через векторный поиск (если указан `template_id`)
 4. **Создание эмбеддингов:** Генерирует векторные представления для гибридного поиска
 5. **Сохранение в БД:** Сохраняет секции в таблицу `source_sections` с метаданными парсинга
+
+#### Очередь Задач (Celery)
+Обработка документов выполняется через Celery для обеспечения надежности и масштабируемости:
+
+*   **Broker:** Redis (для очереди задач)
+*   **Backend:** Redis (для хранения результатов)
+*   **Worker:** Отдельный процесс для выполнения задач парсинга
+*   **Задача:** `process_document_task` в модуле `tasks.py`
+*   **Особенности:**
+    *   Автоматические повторные попытки при ошибках (до 3 раз)
+    *   Ограничение времени выполнения задачи (30 минут максимум)
+    *   Создание новой async сессии БД для каждой задачи
+    *   Использование `asgiref.sync.async_to_sync` для выполнения async функций в синхронном контексте Celery
 
 #### Сервис LLM (`services/llm.py`)
 Класс `LLMClient` предоставляет методы:
@@ -146,6 +169,18 @@ POST /generate
 #### Сервис Экстрактора (`services/extractor.py`)
 Класс `GlobalExtractor` извлекает глобальные переменные исследования:
 *   `extract_globals(project_id) -> Dict[str, str]` - извлекает Phase, Drug Name, Population и т.д. из секций протокола через LLM
+
+#### Сервис Экспорта (`services/exporter.py`)
+Класс `Exporter` предоставляет функции для экспорта готовых документов (deliverables) в различные форматы:
+*   `export_deliverable_to_docx(deliverable_id, db, reference_docx=None) -> bytes` - экспортирует deliverable в формат DOCX используя Pandoc
+*   `export_deliverable_to_docx_file(deliverable_id, db, output_path, reference_docx=None) -> str` - экспортирует deliverable в DOCX файл на диске
+*   Процесс работы:
+    1. Получает все `DeliverableSections` для документа, отсортированные по `order_index`
+    2. Объединяет их `content_html` в один большой HTML документ
+    3. Конвертирует HTML в DOCX используя `pypandoc.convert_text`
+    4. Опционально применяет корпоративный шаблон (`reference.docx`) через параметр `--reference-doc` в Pandoc
+    5. Возвращает бинарные данные DOCX файла
+*   Использует Pandoc для высококачественной конвертации HTML в DOCX с поддержкой корпоративных стилей
 
 #### Сервис Генератора (`services/writer.py`)
 
@@ -383,34 +418,80 @@ async def generate_draft(
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-### 5.4 Формат Промптов
+### 5.4 Управление Промптами
 
-**System Prompt:**
+Промпты для генерации контента и извлечения данных вынесены во внешний файл `ai_engine/prompts.yaml` для удобства редактирования без изменения Python кода.
+
+#### 5.4.1 Структура prompts.yaml
+
+Файл `prompts.yaml` содержит версионированные промпты, организованные по категориям:
+
+```yaml
+version: "1.0"
+
+generation:
+  system_role: |
+    Ты профессиональный медицинский писатель...
+  section_generation: |
+    ИСХОДНЫЕ ДАННЫЕ (Из Протокола/SAP)...
+  default_instruction: |
+    Используй исходные данные для генерации текста...
+
+extraction:
+  system_role: |
+    Ты - эксперт по медицинским исследованиям...
+  extract_globals: |
+    Извлеки глобальные переменные исследования...
+```
+
+#### 5.4.2 PromptManager
+
+Класс `PromptManager` (singleton) загружает промпты из YAML файла и предоставляет метод `get_prompt(key, **kwargs)` для получения и форматирования промптов:
+
+```python
+from services.prompt_manager import PromptManager
+
+prompt_manager = PromptManager()
+
+# Получение промпта с подстановкой переменных
+system_prompt = prompt_manager.get_prompt(
+    "generation.system_role",
+    globals_text=globals_text
+)
+
+user_prompt = prompt_manager.get_prompt(
+    "generation.section_generation",
+    source_content=source_content,
+    instruction_text=instruction_text,
+    section_title=section_title
+)
+```
+
+#### 5.4.3 Формат Промптов
+
+**System Prompt (generation.system_role):**
 ```
 Ты профессиональный медицинский писатель.
 Твоя задача — написать раздел клинического документа.
 
 ГЛОБАЛЬНЫЕ ДАННЫЕ ИССЛЕДОВАНИЯ (Строго соблюдай эти факты):
-- **Phase**: Phase III
-- **Drug_Name**: Препарат X
-- **Population**: Взрослые пациенты с диагнозом Y
+{globals_text}
 
 Важно: Используй только факты из глобальных данных исследования. Не придумывай информацию.
 ```
 
-**User Prompt:**
+**User Prompt (generation.section_generation):**
 ```
 ИСХОДНЫЕ ДАННЫЕ (Из Протокола/SAP):
 
-**Заголовок:** 3.1 Дизайн исследования
-
-**Контент:**
-Исследование представляет собой рандомизированное...
+{source_content}
 
 ИНСТРУКЦИЯ:
-Change future tense to past tense. If you see a table in Markdown, analyze it and describe key data as text.
+{instruction_text}
 
 (Дополнительно: Если видишь таблицу в Markdown, проанализируй её и опиши ключевые данные текстом. Глаголы ставь в прошедшее время, так как исследование завершено.)
 
-Сгенерируй только текст итогового раздела (в формате Markdown).
+Сгенерируй текст для секции "{section_title}" в формате Markdown.
 ```
+
+**Примечание:** Prompt Engineers могут изменять промпты в файле `prompts.yaml` без необходимости изменения Python кода. Для применения изменений без перезапуска приложения можно использовать метод `prompt_manager.reload()`.

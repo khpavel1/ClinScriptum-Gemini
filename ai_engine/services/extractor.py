@@ -10,6 +10,7 @@ from sqlalchemy import select, and_
 
 from models import SourceSection, StudyGlobal, SourceDocument
 from services.llm import LLMClient
+from services.prompt_manager import PromptManager
 
 
 class GlobalExtractor:
@@ -26,6 +27,7 @@ class GlobalExtractor:
             llm_client: Клиент для работы с LLM
         """
         self.llm_client = llm_client
+        self.prompt_manager = PromptManager()
     
     async def extract_globals(
         self,
@@ -85,17 +87,13 @@ class GlobalExtractor:
             for section in sections
         ])
         
-        # Формируем промпт для LLM
-        system_prompt = """Ты - эксперт по медицинским исследованиям. 
-Твоя задача - извлечь структурированные данные из текста протокола исследования.
-Верни результат в формате JSON с ключами: Phase, Drug_Name, Population, Primary_Endpoint, Secondary_Endpoints, Study_Design, Inclusion_Criteria, Exclusion_Criteria.
-Если какое-то поле не найдено, верни null для этого поля."""
+        # Формируем промпт для LLM из prompts.yaml
+        system_prompt = self.prompt_manager.get_prompt("extraction.system_role")
         
-        user_prompt = f"""Извлеки глобальные переменные исследования из следующего текста:
-
-{combined_text}
-
-Верни результат в формате JSON."""
+        user_prompt = self.prompt_manager.get_prompt(
+            "extraction.extract_globals",
+            combined_text=combined_text
+        )
         
         # Генерируем ответ через LLM
         try:

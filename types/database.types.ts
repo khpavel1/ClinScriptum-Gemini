@@ -181,6 +181,7 @@ export type Database = {
           created_at: string
           id: string
           section_id: string
+          trace_info: Json | null
         }
         Insert: {
           change_reason?: string | null
@@ -189,6 +190,7 @@ export type Database = {
           created_at?: string
           id?: string
           section_id: string
+          trace_info?: Json | null
         }
         Update: {
           change_reason?: string | null
@@ -197,6 +199,7 @@ export type Database = {
           created_at?: string
           id?: string
           section_id?: string
+          trace_info?: Json | null
         }
         Relationships: [
           {
@@ -219,6 +222,7 @@ export type Database = {
           locked_by_user_id: string | null
           parent_id: string | null
           status: string
+          trace_info: Json | null
           updated_at: string
           used_source_section_ids: string[] | null
         }
@@ -232,6 +236,7 @@ export type Database = {
           locked_by_user_id?: string | null
           parent_id?: string | null
           status?: string
+          trace_info?: Json | null
           updated_at?: string
           used_source_section_ids?: string[] | null
         }
@@ -245,6 +250,7 @@ export type Database = {
           locked_by_user_id?: string | null
           parent_id?: string | null
           status?: string
+          trace_info?: Json | null
           updated_at?: string
           used_source_section_ids?: string[] | null
         }
@@ -721,6 +727,7 @@ export type Database = {
           bbox: Json | null
           classification_confidence: number | null
           content_markdown: string | null
+          content_structure: Json | null
           content_text: string | null
           created_at: string | null
           custom_section_id: string | null
@@ -736,6 +743,7 @@ export type Database = {
           bbox?: Json | null
           classification_confidence?: number | null
           content_markdown?: string | null
+          content_structure?: Json | null
           content_text?: string | null
           created_at?: string | null
           custom_section_id?: string | null
@@ -751,6 +759,7 @@ export type Database = {
           bbox?: Json | null
           classification_confidence?: number | null
           content_markdown?: string | null
+          content_structure?: Json | null
           content_text?: string | null
           created_at?: string | null
           custom_section_id?: string | null

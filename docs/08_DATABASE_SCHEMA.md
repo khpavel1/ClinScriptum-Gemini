@@ -195,6 +195,7 @@
 | `page_number` | INTEGER | Номер страницы |
 | `content_text` | TEXT | Чистый текст для поиска |
 | `content_markdown` | TEXT | Текст с разметкой таблиц (для LLM) |
+| `content_structure` | JSONB | Структурированное представление таблиц или сложных данных из Docling (JSON формат) |
 | `embedding` | vector(1536) | Векторное представление секции для семантического поиска |
 | `classification_confidence` | FLOAT | Уверенность автоматической классификации (0.0-1.0) |
 | `bbox` | JSONB | Координаты текста в формате JSONB: `{"page": 1, "x": 100, "y": 200, "w": 300, "h": 50}` для подсветки в PDF |
@@ -406,6 +407,7 @@
 | `content_html` | TEXT | HTML контент секции для редактора Tiptap |
 | `status` | deliverable_section_status_enum | Статус секции в workflow: `empty`, `draft_ai`, `in_progress`, `review`, `approved` |
 | `used_source_section_ids` | UUID[] | Массив ID секций исходных документов (source_sections), использованных для генерации |
+| `trace_info` | JSONB | JSON с информацией о трассировке генерации (rule_id, source_ids, scores, mapping_type) |
 | `locked_by_user_id` | UUID (FK → auth.users) | ID пользователя, заблокировавшего секцию для редактирования |
 | `locked_at` | TIMESTAMPTZ | Время блокировки секции |
 | `created_at` | TIMESTAMPTZ | Время создания секции |
@@ -436,6 +438,7 @@
 | `content_snapshot` | TEXT | Снимок HTML контента на момент изменения |
 | `changed_by_user_id` | UUID (FK → auth.users) | Пользователь, внесший изменение |
 | `change_reason` | TEXT | Причина изменения (например, "AI generation", "Manual edit", "Review feedback") |
+| `trace_info` | JSONB | Снимок trace_info на момент изменения (для полной трассируемости) |
 | `created_at` | TIMESTAMPTZ | Время создания записи истории |
 
 **Индексы:**
@@ -785,6 +788,13 @@ custom_sections
 10. **Audit Trail:** 
     - Отслеживание использованных исходных секций через массив `used_source_section_ids` в deliverable_sections
     - Полная история изменений через таблицу `deliverable_section_history`
+    - Полная трассируемость процесса генерации через поле `trace_info` (JSONB), содержащее:
+      - ID правил маппинга (rule_id)
+      - Тип правила (CustomMapping или IdealMapping)
+      - ID исходных секций (source_ids)
+      - Порядок применения правил (order_index)
+      - Инструкции для AI (instruction)
+      - Снимок trace_info сохраняется в истории изменений для ответа на вопрос "Почему был сгенерирован этот текст?"
 11. **Безопасность:** RLS на всех таблицах для обеспечения изоляции данных
 12. **Координаты текста:** Хранение координат (bbox) для подсветки исходных секций в PDF-документах
 

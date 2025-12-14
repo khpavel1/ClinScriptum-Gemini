@@ -2,23 +2,26 @@
 Точка входа для микросервиса AI Engine на FastAPI.
 Включает настройку CORS, эндпоинты и запуск Uvicorn.
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from uuid import UUID
 from contextlib import asynccontextmanager
 import uvicorn
+import io
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import init_db, close_db, get_db
-from models import IdealTemplate, CustomTemplate, DeliverableSection
+from models import IdealTemplate, CustomTemplate, DeliverableSection, Deliverable
 from services import DoclingParser, Section
-from services.parser import process_document
+from tasks import process_document_task
 from services.llm import LLMClient
 from services.extractor import GlobalExtractor
 from services.writer import Writer
+from services.exporter import export_deliverable_to_docx
 from sqlalchemy import select
 
 
@@ -176,15 +179,13 @@ class TemplateResponse(BaseModel):
 
 @app.post("/api/v1/parse", response_model=ParseDocumentResponse)
 async def parse_document_background(
-    request: ParseDocumentRequest,
-    background_tasks: BackgroundTasks
+    request: ParseDocumentRequest
 ):
     """
-    Запускает парсинг документа в фоне и сохраняет секции в БД.
+    Запускает парсинг документа через Celery и сохраняет секции в БД.
     
     Args:
         request: Запрос с document_id, file_path (или file_url) и template_id
-        background_tasks: FastAPI BackgroundTasks для асинхронной обработки
         
     Returns:
         Ответ с подтверждением начала обработки
@@ -193,9 +194,8 @@ async def parse_document_background(
         HTTPException: Если произошла ошибка при запуске задачи
     """
     try:
-        # Добавляем задачу в фон
-        background_tasks.add_task(
-            process_document,
+        # Запускаем Celery задачу
+        task = process_document_task.delay(
             doc_id=request.document_id,
             file_url=request.file_url,
             file_path=request.file_path,
@@ -203,7 +203,7 @@ async def parse_document_background(
         )
         
         return ParseDocumentResponse(
-            message="Парсинг документа запущен в фоне",
+            message=f"Парсинг документа запущен в очереди (task_id: {task.id})",
             document_id=request.document_id,
             status="processing"
         )
@@ -218,13 +218,12 @@ async def parse_document_background(
 
 @app.post("/parse", response_model=ParseDocumentResponse)
 async def parse_document(
-    request: ParseDocumentRequest,
-    background_tasks: BackgroundTasks
+    request: ParseDocumentRequest
 ):
     """
-    Запускает парсинг документа в фоне (алиас для /api/v1/parse).
+    Запускает парсинг документа через Celery (алиас для /api/v1/parse).
     """
-    return await parse_document_background(request, background_tasks)
+    return await parse_document_background(request)
 
 
 @app.post("/generate", response_model=GenerateResponse)
@@ -284,6 +283,70 @@ async def generate_section(
         raise HTTPException(
             status_code=500,
             detail=f"Ошибка при генерации секции: {str(e)}"
+        )
+
+
+@app.get("/api/v1/export/{deliverable_id}")
+async def export_deliverable(
+    deliverable_id: UUID,
+    reference_docx: Optional[str] = Query(None, description="Путь к шаблону DOCX с корпоративными стилями"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Экспортирует deliverable в формат DOCX используя Pandoc.
+    
+    Args:
+        deliverable_id: UUID документа для экспорта
+        reference_docx: Опциональный путь к шаблону DOCX с корпоративными стилями
+        db: SQLAlchemy асинхронная сессия
+        
+    Returns:
+        StreamingResponse с DOCX файлом
+        
+    Raises:
+        HTTPException: Если deliverable не найден, нет секций или произошла ошибка конвертации
+    """
+    try:
+        # Получаем deliverable для имени файла
+        deliverable_result = await db.execute(
+            select(Deliverable).where(Deliverable.id == deliverable_id)
+        )
+        deliverable = deliverable_result.scalar_one_or_none()
+        
+        if not deliverable:
+            raise HTTPException(status_code=404, detail=f"Deliverable not found: {deliverable_id}")
+        
+        # Экспортируем в DOCX
+        docx_bytes = await export_deliverable_to_docx(
+            deliverable_id=deliverable_id,
+            db=db,
+            reference_docx=reference_docx
+        )
+        
+        # Формируем имя файла
+        filename = f"{deliverable.title or 'document'}.docx"
+        # Очищаем имя файла от недопустимых символов
+        filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).strip()
+        if not filename.endswith('.docx'):
+            filename += '.docx'
+        
+        # Возвращаем файл как поток
+        return StreamingResponse(
+            io.BytesIO(docx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка при экспорте: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Неожиданная ошибка при экспорте документа: {str(e)}"
         )
 
 

@@ -2476,5 +2476,82 @@ BEGIN
 END $$;
 
 -- ============================================
+-- МИГРАЦИЯ: Добавление content_structure в source_sections
+-- ============================================
+DO $$
+BEGIN
+    -- Добавляем колонку content_structure, если её нет
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'source_sections') THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'source_sections' AND column_name = 'content_structure'
+        ) THEN
+            ALTER TABLE source_sections
+            ADD COLUMN content_structure JSONB;
+            
+            COMMENT ON COLUMN source_sections.content_structure IS 'Structured representation of tables or complex data from Docling (JSON format)';
+        END IF;
+    END IF;
+END $$;
+
+-- ============================================
+-- МИГРАЦИЯ: Добавление trace_info для полной трассируемости (Audit Trail)
+-- ============================================
+DO $$
+BEGIN
+    -- Добавляем trace_info в deliverable_sections
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'deliverable_sections') THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'deliverable_sections' AND column_name = 'trace_info'
+        ) THEN
+            ALTER TABLE deliverable_sections
+            ADD COLUMN trace_info JSONB;
+            
+            COMMENT ON COLUMN deliverable_sections.trace_info IS 'JSON containing logic used for generation (rule_id, source_ids, scores, mapping_type)';
+        END IF;
+    END IF;
+    
+    -- Добавляем trace_info в deliverable_section_history
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'deliverable_section_history') THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'deliverable_section_history' AND column_name = 'trace_info'
+        ) THEN
+            ALTER TABLE deliverable_section_history
+            ADD COLUMN trace_info JSONB;
+            
+            COMMENT ON COLUMN deliverable_section_history.trace_info IS 'Snapshot of trace_info at the moment of change';
+        END IF;
+    END IF;
+    
+END $$;
+
+-- Обновляем функцию триггера для захвата trace_info
+CREATE OR REPLACE FUNCTION "public"."create_deliverable_section_history"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    -- Создаем запись истории только если изменился контент или статус
+    IF OLD.content_html IS DISTINCT FROM NEW.content_html OR OLD.status IS DISTINCT FROM NEW.status THEN
+        INSERT INTO deliverable_section_history (
+            section_id,
+            content_snapshot,
+            changed_by_user_id,
+            change_reason,
+            trace_info
+        ) VALUES (
+            NEW.id,
+            NEW.content_html,
+            COALESCE(NEW.locked_by_user_id, auth.uid()),
+            'Auto-saved: ' || COALESCE(NEW.status::text, 'unknown'),
+            NEW.trace_info
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ============================================
 -- МИГРАЦИЯ ЗАВЕРШЕНА
 -- ============================================

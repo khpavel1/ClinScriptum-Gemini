@@ -11,3 +11,8 @@ yandex-chain
 tenacity # Для ретраев
 pgvector
 httpx
+celery
+redis
+asgiref
+pyyaml
+pypandoc
