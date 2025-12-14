@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Toaster } from "sonner";
+import { AppLayoutWrapper } from "@/components/app-layout-wrapper";
 
 export const metadata: Metadata = {
   title: "Gemini Project",
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="ru">
       <body>
-        {children}
+        <AppLayoutWrapper>
+          {children}
+        </AppLayoutWrapper>
         <Toaster />
       </body>
     </html>

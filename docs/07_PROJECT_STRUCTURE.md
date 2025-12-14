@@ -49,6 +49,14 @@ app/
 ├── dashboard/                  # Дашборд пользователя
 │   ├── page.tsx                # Главная страница дашборда
 │   └── actions.ts              # Server Actions для дашборда
+├── admin/                      # Административная панель
+│   └── templates/              # Управление шаблонами документов
+│       ├── page.tsx            # Главная страница управления шаблонами (Three-Pane Layout)
+│       ├── types.ts            # TypeScript типы для шаблонов (Template, TreeNode, Mapping)
+│       └── _components/        # Компоненты страницы управления шаблонами
+│           ├── templates-sidebar.tsx    # Левая панель: список шаблонов и поиск
+│           ├── structure-tree.tsx       # Средняя панель: дерево структуры секций
+│           └── section-inspector.tsx   # Правая панель: редактор секции и маппинги
 └── projects/                   # Управление проектами
     └── [id]/                   # Динамический маршрут для проекта
         ├── page.tsx            # Страница проекта (использует ProjectView)
@@ -66,6 +74,16 @@ app/
 - `projects/[id]/actions.ts` - серверные действия для работы с проектом:
   - `uploadSourceAction` - загрузка исходных документов в Supabase Storage и запуск парсинга через AI Engine
   - `createDeliverableAction` - создание нового документа (deliverable) на основе шаблона с автоматическим созданием пустых секций
+- `admin/templates/page.tsx` - главная страница управления шаблонами документов (Ideal Templates), использует Three-Pane Layout (см. [09_ADMIN_TEMPLATES.md](./09_ADMIN_TEMPLATES.md))
+- `admin/templates/actions.ts` - Server Actions для работы с идеальными шаблонами (CRUD операции, перемещение секций, маппинги)
+  - Левая панель: список шаблонов с поиском и кнопкой добавления
+  - Средняя панель: дерево структуры секций выбранного шаблона с возможностью drag-and-drop
+  - Правая панель: редактор выбранной секции (General и AI Mappings вкладки)
+- `admin/templates/types.ts` - TypeScript типы для работы с шаблонами (Template, TreeNode, Mapping)
+- `admin/templates/_components/` - компоненты для управления шаблонами:
+  - `templates-sidebar.tsx` - левая панель со списком шаблонов, поиском и фильтрацией
+  - `structure-tree.tsx` - средняя панель с рекурсивным деревом секций, поддержкой drag-and-drop и контекстного меню
+  - `section-inspector.tsx` - правая панель с формой редактирования секции и управлением маппингами
 
 ### `components/` - React компоненты
 
@@ -114,12 +132,17 @@ lib/
 ├── supabase/
 │   ├── client.ts               # Клиент Supabase для клиентской стороны
 │   └── server.ts               # Клиент Supabase для серверной стороны
+├── stores/                     # Zustand stores для управления состоянием
+│   ├── section-editor-store.ts # Store для редактора секций документов
+│   └── admin-template-store.ts # Store для управления идеальными шаблонами
 └── utils.ts                    # Общие утилиты (cn, и т.д.)
 ```
 
 **Описание:**
 - `supabase/client.ts` - инициализация Supabase клиента для использования в клиентских компонентах
 - `supabase/server.ts` - инициализация Supabase клиента для Server Components и Server Actions
+- `stores/section-editor-store.ts` - Zustand store для управления несохраненным контентом секций в редакторе
+- `stores/admin-template-store.ts` - Zustand store для управления состоянием дерева секций в Ideal Template Manager
 - `utils.ts` - вспомогательные функции (например, функция `cn` для объединения классов)
 
 ### `types/` - TypeScript типы
@@ -235,6 +258,8 @@ docs/
 ├── 05_QC_COMPLIANCE.md         # Контроль качества и соответствие
 ├── 06_EXPORT.md                # Экспорт документов
 ├── 07_PROJECT_STRUCTURE.md     # Структура проекта (этот документ)
+├── 08_DATABASE_SCHEMA.md       # Схема базы данных
+├── 09_ADMIN_TEMPLATES.md       # Ideal Template Manager (админ-панель)
 └── schema.sql                  # Полная SQL схема базы данных
 ```
 

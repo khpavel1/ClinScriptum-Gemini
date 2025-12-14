@@ -1,0 +1,11 @@
+учитывай следующие требования при разработке или изменении дизайна проекта:
+
+CONTEXT: Medical Data SaaS (ClinScriptum).
+STACK: Next.js + Tailwind + Shadcn UI.
+STYLE GUIDE:
+- Colors: Neutral Slates (slate-50 to slate-900) with Blue-600 as the primary action color.
+- Vibe: Professional, "Information Dense" (avoid huge paddings), Technical.
+- Borders: Subtle (border-slate-200).
+- Radius: rounded-md.
+- Components: Use Shadcn Card, Table, Button, Badge, ScrollArea.
+
